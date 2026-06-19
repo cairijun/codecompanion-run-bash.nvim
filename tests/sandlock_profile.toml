@@ -1,0 +1,14 @@
+[filesystem]
+read = [
+    "/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/proc",
+    "/dev/null", "/dev/zero", "/dev/urandom", "/dev/random",
+    "/dev/tty", "/dev/pts",
+]
+write = [
+    "/tmp", "/var/tmp",
+    "/dev/null",
+]
+deny = ["/root", "/sys", "/proc/sys", "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"]
+
+[network]
+allow = ["tcp://*:*", "udp://*:53", "icmp://*"]

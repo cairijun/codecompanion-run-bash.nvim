@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Dependencies
+deps/
+
+# Logs
+*.log
+
+# Lua cache
+*.luac
