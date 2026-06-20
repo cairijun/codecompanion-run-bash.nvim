@@ -57,11 +57,18 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
           opts = {
             -- Below is the default configuration (except `profile`).
             sandbox = {
-              enabled = true,                                                -- sandbox on by default
-              profile = vim.fn.stdpath("config") .. "/agent_bash_sandlock.toml", -- REQUIRED: your sandlock profile path
+              -- REQUIRED: your sandlock profile path
+              profile = vim.fn.stdpath("config") .. "/agent_bash_sandlock.toml",
+              enabled = true, -- sandbox on by default
               rules = {
-                writable = function() return { vim.fn.getcwd() } end,        -- extra writable paths passed to sandlock at runtime
-                readable = function() return { vim.fn.expand("$HOME") } end, -- extra readable paths passed to sandlock at runtime
+                -- extra readable paths passed to sandlock at runtime
+                readable = function()
+                  return { vim.fn.expand("~") }
+                end,
+                -- extra writable paths passed to sandlock at runtime
+                writable = function()
+                  return { vim.fn.getcwd(), vim.fn.expand("~/.cache") }
+                end,
               },
             },
             -- uncomment to override built-in rules:
@@ -87,7 +94,7 @@ You need to prepare your own sandlock profile. Below is a strict sample that cov
 ```toml
 [filesystem]
 read = [
-    "/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/proc",
+    "/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/proc", "/var",
     "/dev/zero", "/dev/urandom", "/dev/random", "/dev/tty", "/dev/pts",
 ]
 write = [

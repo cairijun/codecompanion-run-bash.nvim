@@ -13,6 +13,19 @@ local uv = vim.uv
 
 local M = {}
 
+---Built-in default sandbox configuration
+M.defaults = {
+  enabled = true,
+  rules = {
+    readable = function()
+      return { vim.fn.expand("~") }
+    end,
+    writable = function()
+      return { vim.fn.getcwd(), vim.fn.expand("~/.cache") }
+    end,
+  },
+}
+
 ---Expand a dynamic rule to flag + path pairs
 ---@param rule function|table|nil
 ---@param flag string

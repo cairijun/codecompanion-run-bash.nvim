@@ -53,8 +53,8 @@ function M.setup(opts)
   -- Create checker instance
   checker_instance = checker.new(merged_blocklist)
 
-  -- Get sandbox opts (pass through)
-  local sandbox_opts = opts.sandbox
+  -- Merge sandbox defaults: user opts override defaults
+  local sandbox_opts = vim.tbl_deep_extend("force", sandbox.defaults, opts.sandbox or {})
 
   -- Register tool in tools_config
   local tools_config = get_tools_config()

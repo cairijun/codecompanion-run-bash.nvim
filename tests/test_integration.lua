@@ -31,6 +31,75 @@ end
 
 -- ── Approval decisions (non-sandbox mode) ────────────────────────
 
+T["registration: default sandbox config applied when no opts given"] = function()
+  -- Intent: Verify that when no sandbox options are provided,
+  -- default configuration is applied with enabled=true and default rules.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  -- Reset and setup with no sandbox opts
+  tools_config.run_bash = nil
+  run_bash.setup({})
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
+  MiniTest.expect.equality(true, s_opts.enabled, "sandbox should be enabled by default")
+  MiniTest.expect.equality("function", type(s_opts.rules.readable), "rules.readable should be a function")
+  MiniTest.expect.equality("function", type(s_opts.rules.writable), "rules.writable should be a function")
+  MiniTest.expect.equality(true, type(s_opts.rules.readable()) == "table", "readable should return table")
+  MiniTest.expect.equality(true, type(s_opts.rules.writable()) == "table", "writable should return table")
+end
+
+T["registration: partial sandbox opts merge with defaults"] = function()
+  -- Intent: Verify that partial sandbox options merge with defaults
+  -- rather than replacing them entirely.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { enabled = false } })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(false, s_opts.enabled, "user override should be preserved")
+  MiniTest.expect.equality(true, s_opts.rules ~= nil, "default rules should still be present")
+end
+
+T["registration: enabled=false override disables sandbox"] = function()
+  -- Intent: Verify that user can explicitly disable sandbox by setting
+  -- enabled = false, overriding the default true.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { enabled = false } })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(false, s_opts.enabled, "enabled should be false when user overrides")
+  -- Rules from defaults should still be merged in
+  MiniTest.expect.equality("function", type(s_opts.rules.readable), "default readable rule should be preserved")
+  MiniTest.expect.equality("function", type(s_opts.rules.writable), "default writable rule should be preserved")
+end
+
+T["registration: partial rules override merges with defaults"] = function()
+  -- Intent: Verify that overriding only rules.writable still preserves
+  -- the default rules.readable from defaults.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  local custom_writable = function()
+    return { "/custom/path" }
+  end
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { profile = "/some/profile.toml", rules = { writable = custom_writable } } })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(true, s_opts.enabled, "default enabled should be true")
+  MiniTest.expect.equality(true, s_opts.profile == "/some/profile.toml", "user profile should be set")
+  MiniTest.expect.equality("function", type(s_opts.rules.readable), "default readable rule should be preserved")
+  MiniTest.expect.equality(custom_writable, s_opts.rules.writable, "user writable override should be used")
+end
+
 T["approval: run cmd requires approval in non-sandbox"] = function()
   local run_bash = require("codecompanion._extensions.run_bash")
   local tools_config = require("codecompanion.config").interactions.chat.tools
