@@ -2,14 +2,16 @@
 -- Sets up runtime path and loads required dependencies
 
 -- Add dependencies to runtime path FIRST
-vim.opt.rtp:prepend("deps/mini.nvim")
-vim.opt.rtp:prepend("deps/plenary.nvim")
-vim.opt.rtp:prepend("deps/nvim-treesitter")
-vim.opt.rtp:prepend("deps/codecompanion.nvim")
-vim.opt.rtp:prepend("deps/codecompanion.nvim/tests") -- For tests.mocks.http
+-- Use absolute paths so parsers are discoverable regardless of cwd
+local project_root = vim.fn.fnamemodify(".", ":p"):sub(1, -2) -- remove trailing slash
+vim.opt.rtp:prepend(project_root .. "/deps/mini.nvim")
+vim.opt.rtp:prepend(project_root .. "/deps/plenary.nvim")
+vim.opt.rtp:prepend(project_root .. "/deps/nvim-treesitter")
+vim.opt.rtp:prepend(project_root .. "/deps/codecompanion.nvim")
+vim.opt.rtp:prepend(project_root .. "/deps/codecompanion.nvim/tests") -- For tests.mocks.http
 
 -- Set current project to runtime path AFTER codecompanion
-vim.opt.rtp:append(vim.fn.getcwd())
+vim.opt.rtp:append(project_root)
 
 -- Disable ShaDa to avoid permission errors in sandbox
 vim.opt.shadafile = "NONE"
@@ -39,4 +41,10 @@ if #to_install > 0 then
     require("nvim-treesitter").install(to_install, { summary = true, max_jobs = 10 }):wait(1800000)
 
   assert(ok, "Failed to install Tree-sitter parsers: " .. tostring(msg))
+end
+
+-- Explicitly register parsers so vim.treesitter can discover them
+for _, lang in ipairs(required_parsers) do
+  local parser_path = project_root .. "/" .. parser_dir .. "/" .. lang .. ".so"
+  vim.treesitter.language.add(lang, { path = parser_path })
 end

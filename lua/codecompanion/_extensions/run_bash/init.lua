@@ -102,10 +102,12 @@ function M.setup(opts)
   end
 
   -- Check bash treesitter parser
-  local ok, _ = pcall(vim.treesitter.get_string_parser, "", "bash")
+  local ok, parser_or_err = pcall(vim.treesitter.get_string_parser, "", "bash")
   if not ok then
     vim.notify(
-      "run_bash: bash treesitter parser not found. All sandbox commands will require approval.",
+      "run_bash: bash treesitter parser not found ("
+        .. tostring(parser_or_err)
+        .. "). All sandbox commands will require approval.",
       vim.log.levels.WARN
     )
   end

@@ -1,0 +1,84 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      SANDLOCK_VERSION: 0.8.3
+    strategy:
+      fail-fast: false
+      matrix:
+        nvim-version: [stable, nightly]
+        deps-mode: [pinned, nightly]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set DEPS_MODE
+        run: echo "DEPS_MODE=${{ matrix.deps-mode }}" >> $GITHUB_ENV
+
+      - name: Install Neovim
+        uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim-version }}
+
+      - name: Setup tree-sitter
+        uses: tree-sitter/setup-action@v2
+        with:
+          install-lib: false
+
+      - name: Cache dependencies (pinned)
+        if: matrix.deps-mode == 'pinned'
+        uses: actions/cache@v5
+        with:
+          path: deps
+          key: deps-pinned-${{ hashFiles('Makefile') }}
+
+      - name: Cache dependencies (nightly)
+        if: matrix.deps-mode == 'nightly'
+        uses: actions/cache@v5
+        with:
+          path: deps
+          key: deps-nightly-${{ github.run_id }}
+          restore-keys: |
+            deps-nightly-
+
+      - name: Install dependencies
+        run: make deps
+
+      - name: Cache sandlock
+        id: cache-sandlock
+        uses: actions/cache@v5
+        with:
+          path: ~/.local/bin/sandlock
+          key: sandlock-v${{ env.SANDLOCK_VERSION }}-x86_64
+
+      - name: Install sandlock
+        if: steps.cache-sandlock.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.local/bin
+          curl -LO https://github.com/multikernel/sandlock/releases/download/v${{ env.SANDLOCK_VERSION }}/sandlock-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf sandlock-x86_64-unknown-linux-gnu.tar.gz
+          install -m 755 sandlock ~/.local/bin/sandlock
+          rm -f sandlock-x86_64-unknown-linux-gnu.tar.gz sandlock
+
+      - name: Deps check
+        run: |
+          echo "=== sandlock ==="
+          sandlock --version
+          sandlock check
+          echo "=== nvim ==="
+          nvim -V1 -v
+          nvim --headless --noplugin -u ./tests/minimal_init.lua -c 'checkhealth' -c 'w /tmp/nvim_checkhealth.txt' -c 'qall!'
+          cat /tmp/nvim_checkhealth.txt
+
+      - name: Run tests
+        run: |
+          make test
