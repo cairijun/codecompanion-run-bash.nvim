@@ -70,6 +70,11 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
                   return { vim.fn.getcwd(), vim.fn.expand("~/.cache") }
                 end,
               },
+              -- extra sandlock CLI args (optional)
+              -- useful for older kernels that need degraded protection:
+              -- extra_args = { "--allow-degraded", "signal-scope" },
+              -- or to disable specific protections:
+              -- extra_args = { "--disable", "fs-refer" },
             },
             -- uncomment to override built-in rules:
             -- blocklist = {

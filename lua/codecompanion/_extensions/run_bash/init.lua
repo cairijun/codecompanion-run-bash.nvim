@@ -42,7 +42,7 @@ end
 
 ---Setup the run_bash extension
 ---@param opts table Configuration options
----@param opts.sandbox? table Sandbox configuration: { enabled, profile, rules }
+---@param opts.sandbox? table Sandbox configuration: { enabled, profile, rules, extra_args }
 ---@param opts.blocklist? table Blocklist overrides: { cmd = true|false|fun(args): boolean }
 function M.setup(opts)
   opts = opts or {}

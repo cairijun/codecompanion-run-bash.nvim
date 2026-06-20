@@ -802,6 +802,201 @@ do
     MiniTest.expect.equality("echo second", second_cmd, "second test should capture its own args")
     MiniTest.expect.equality(orig_spawn, uv.spawn, "uv.spawn restored after second test")
   end
+
+  T["spy: extra_args passed to sandlock"] = function()
+    -- Intent: Verify extra_args are inserted into sandlock args before `--`
+    local orig_spawn = uv.spawn
+    local orig_unref = uv.unref
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12350
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      extra_args = { "--allow-degraded", "signal-scope" },
+      rules = {
+        writable = function()
+          return { "/tmp/writable" }
+        end,
+        readable = function()
+          return { "/home" }
+        end,
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy5",
+      on_exit = function() end,
+    })
+
+    uv.spawn = orig_spawn
+    uv.unref = orig_unref
+
+    MiniTest.expect.equality(true, captured_args ~= nil)
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--allow-degraded", args_str)
+    Helpers.expect_contains("signal-scope", args_str)
+    -- Verify extra_args appear before `--`
+    local dash_dash_idx = nil
+    local degraded_idx = nil
+    for i, arg in ipairs(captured_args or {}) do
+      if arg == "--" and not dash_dash_idx then
+        dash_dash_idx = i
+      end
+      if arg == "--allow-degraded" then
+        degraded_idx = i
+      end
+    end
+    MiniTest.expect.equality(true, dash_dash_idx ~= nil, "should have -- separator")
+    MiniTest.expect.equality(true, degraded_idx ~= nil, "should have --allow-degraded")
+    if dash_dash_idx and degraded_idx then
+      MiniTest.expect.equality(true, degraded_idx < dash_dash_idx, "extra_args should appear before --")
+    end
+  end
+
+  T["spy: extra_args nil adds nothing"] = function()
+    -- Intent: Verify that when extra_args is nil, no extra args are added
+    local orig_spawn = uv.spawn
+    local orig_unref = uv.unref
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12351
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        writable = function()
+          return { "/tmp/writable" }
+        end,
+        readable = function()
+          return { "/home" }
+        end,
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy6",
+      on_exit = function() end,
+    })
+
+    uv.spawn = orig_spawn
+    uv.unref = orig_unref
+
+    MiniTest.expect.equality(true, captured_args ~= nil)
+    local args_str = table.concat(captured_args or {}, " ")
+    -- Should not contain any extra_args-related content
+    local has_degraded = string.find(args_str, "--allow-degraded") ~= nil
+    MiniTest.expect.equality(false, has_degraded, "should not have --allow-degraded")
+  end
+
+  T["spy: extra_args empty table adds nothing"] = function()
+    -- Intent: Verify that when extra_args is an empty table, no extra args are added
+    local orig_spawn = uv.spawn
+    local orig_unref = uv.unref
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12352
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      extra_args = {},
+      rules = {
+        writable = function()
+          return { "/tmp/writable" }
+        end,
+        readable = function()
+          return { "/home" }
+        end,
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy7",
+      on_exit = function() end,
+    })
+
+    uv.spawn = orig_spawn
+    uv.unref = orig_unref
+
+    MiniTest.expect.equality(true, captured_args ~= nil)
+    -- Verify the args structure is correct (no extra elements)
+    -- The args should end with: ... -r /home -- bash -c echo hi
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("-- bash -c echo hi", args_str)
+  end
+
+  T["spy: extra_args multiple args"] = function()
+    -- Intent: Verify that multiple extra_args are all added correctly
+    local orig_spawn = uv.spawn
+    local orig_unref = uv.unref
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12353
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      extra_args = { "--allow-degraded", "fs-refer", "--disable", "signal-scope" },
+      rules = {
+        writable = function()
+          return { "/tmp/writable" }
+        end,
+        readable = function()
+          return { "/home" }
+        end,
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy8",
+      on_exit = function() end,
+    })
+
+    uv.spawn = orig_spawn
+    uv.unref = orig_unref
+
+    MiniTest.expect.equality(true, captured_args ~= nil)
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--allow-degraded", args_str)
+    Helpers.expect_contains("fs-refer", args_str)
+    Helpers.expect_contains("--disable", args_str)
+    Helpers.expect_contains("signal-scope", args_str)
+  end
 end
 
 return T

@@ -694,4 +694,143 @@ T["execution: invalid sandbox profile falls back to non-sandbox"] = function()
   end
 end
 
+-- ── Extra args configuration ─────────────────────────────────────
+
+T["config: extra_args merged correctly"] = function()
+  -- Intent: Verify that extra_args from user config is correctly merged
+  -- into sandbox_opts via vim.tbl_deep_extend.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = {
+      enabled = true,
+      extra_args = { "--allow-degraded", "signal-scope" },
+    },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
+  MiniTest.expect.equality(true, s_opts.enabled ~= nil, "enabled should be present")
+  MiniTest.expect.equality(true, s_opts.extra_args ~= nil, "extra_args should be present")
+  MiniTest.expect.equality(2, #s_opts.extra_args, "extra_args should have 2 elements")
+  MiniTest.expect.equality("--allow-degraded", s_opts.extra_args[1])
+  MiniTest.expect.equality("signal-scope", s_opts.extra_args[2])
+end
+
+T["config: extra_args empty when not configured"] = function()
+  -- Intent: Verify that when extra_args is not configured, it remains nil.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = {
+      enabled = true,
+    },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
+  MiniTest.expect.equality(nil, s_opts.extra_args, "extra_args should be nil when not configured")
+end
+
+T["integration: extra_args with sandbox"] = function()
+  -- Intent: Verify that extra_args are correctly passed through the entire
+  -- tool call flow when sandbox is available.
+  local profile = Helpers.sandbox_profile_path()
+  Helpers.require_sandbox()
+
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+  local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
+
+  -- Spy on sandbox.run to capture the args
+  local orig_run = sandbox_mod.run
+  local captured_sandbox_opts = nil
+  sandbox_mod.run = function(sandbox_opts, exec_params)
+    captured_sandbox_opts = sandbox_opts
+    return orig_run(sandbox_opts, exec_params)
+  end
+
+  local def = tool_mod.create({
+    enabled = true,
+    profile = profile,
+    rules = {},
+    extra_args = { "--allow-degraded", "signal-scope" },
+  })
+  local handler = def.cmds[1]
+
+  local output_data = nil
+  handler({
+    tool = {
+      opts = {
+        sandbox = {
+          enabled = true,
+          profile = profile,
+          rules = {},
+          extra_args = { "--allow-degraded", "signal-scope" },
+        },
+      },
+    },
+  }, { cmd = "echo extra-args-test" }, {
+    output_cb = function(data)
+      output_data = data
+    end,
+  })
+
+  local ok = vim.wait(5000, function()
+    return output_data ~= nil
+  end, 50)
+
+  -- Restore original sandbox.run
+  sandbox_mod.run = orig_run
+
+  MiniTest.expect.equality(true, ok, "should complete within 5s")
+  MiniTest.expect.equality(true, captured_sandbox_opts ~= nil, "sandbox_opts should be captured")
+  if captured_sandbox_opts then
+    MiniTest.expect.equality(true, captured_sandbox_opts.extra_args ~= nil, "extra_args should be present")
+    MiniTest.expect.equality(2, #captured_sandbox_opts.extra_args, "extra_args should have 2 elements")
+  end
+end
+
+T["integration: extra_args ignored when sandbox unavailable"] = function()
+  -- Intent: Verify that extra_args are ignored when sandbox is not available
+  -- (e.g., sandlock not installed or sandbox disabled).
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+
+  local def = tool_mod.create({
+    enabled = false, -- sandbox disabled
+    extra_args = { "--allow-degraded", "signal-scope" },
+  })
+  local handler = def.cmds[1]
+
+  local output_data = nil
+  handler({
+    tool = {
+      opts = {
+        sandbox = {
+          enabled = false,
+          extra_args = { "--allow-degraded", "signal-scope" },
+        },
+      },
+    },
+  }, { cmd = "echo no-sandbox" }, {
+    output_cb = function(data)
+      output_data = data
+    end,
+  })
+
+  local ok = vim.wait(5000, function()
+    return output_data ~= nil
+  end, 50)
+
+  MiniTest.expect.equality(true, ok, "should complete within 5s")
+  MiniTest.expect.equality("success", output_data.status, "command should succeed")
+  Helpers.expect_contains("no-sandbox", output_data.data.output)
+  -- Ensure no sandlock errors
+  local has_sandlock = output_data.data.output:find("sandlock", 1, true) ~= nil
+  MiniTest.expect.equality(false, has_sandlock, "output should not contain sandlock errors")
+end
+
 return T

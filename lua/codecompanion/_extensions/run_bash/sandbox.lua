@@ -91,6 +91,10 @@ function M.run(sandbox_opts, exec_params)
       { "run", "--profile-file", sandbox_opts.profile, "--name", sandbox_name, "--port-remap" }
     vim.list_extend(spawn_args, expand_rule(rules.writable, "-w"))
     vim.list_extend(spawn_args, expand_rule(rules.readable, "-r"))
+    -- Insert user-configured extra sandlock args before `--`
+    if sandbox_opts.extra_args then
+      vim.list_extend(spawn_args, sandbox_opts.extra_args)
+    end
     vim.list_extend(spawn_args, { "--", "bash", "-c", cmd })
   else
     executable = "bash"
