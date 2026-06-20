@@ -1,836 +1,342 @@
 --[[
-Test: run_bash — Integration Tests (in-process)
+Test: run_bash — Integration Tests (Chat-path)
 
-Intent: Verify registration, approval decisions, and command execution
-without child Neovim. For execution, test the tool handler directly
-rather than via mock HTTP.
+Intent: Verify the full CodeCompanion chat → run_bash → sandbox → command
+pipeline end-to-end, mocking only the LLM Adapter.
 
 ]]
 
-local uv = vim.uv
 local Helpers = require("tests.helpers")
 local T = MiniTest.new_set()
 
--- ── Extension registration ───────────────────────────────────────
-
-T["registration: setup registers run_bash in tools_config"] = function()
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  -- Ensure not already registered
-  tools_config.run_bash = nil
-
-  run_bash.setup({ sandbox = { enabled = false } })
-
-  MiniTest.expect.equality(true, tools_config.run_bash ~= nil)
-  MiniTest.expect.equality(true, tools_config.run_bash.opts.require_cmd_approval)
-  MiniTest.expect.equality(false, tools_config.run_bash.opts.allowed_in_yolo_mode)
-  MiniTest.expect.equality("function", type(tools_config.run_bash.opts.require_approval_before))
-  MiniTest.expect.equality("function", type(tools_config.run_bash.callback))
-end
-
--- ── Approval decisions (non-sandbox mode) ────────────────────────
-
-T["registration: default sandbox config applied when no opts given"] = function()
-  -- Intent: Verify that when no sandbox options are provided,
-  -- default configuration is applied with enabled=true and default rules.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  -- Reset and setup with no sandbox opts
-  tools_config.run_bash = nil
-  run_bash.setup({})
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(true, s_opts.enabled, "sandbox should be enabled by default")
-  MiniTest.expect.equality("function", type(s_opts.rules.readable), "rules.readable should be a function")
-  MiniTest.expect.equality("function", type(s_opts.rules.writable), "rules.writable should be a function")
-  MiniTest.expect.equality(true, type(s_opts.rules.readable()) == "table", "readable should return table")
-  MiniTest.expect.equality(true, type(s_opts.rules.writable()) == "table", "writable should return table")
-end
-
-T["registration: partial sandbox opts merge with defaults"] = function()
-  -- Intent: Verify that partial sandbox options merge with defaults
-  -- rather than replacing them entirely.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  tools_config.run_bash = nil
-  run_bash.setup({ sandbox = { enabled = false } })
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(false, s_opts.enabled, "user override should be preserved")
-  MiniTest.expect.equality(true, s_opts.rules ~= nil, "default rules should still be present")
-end
-
-T["registration: enabled=false override disables sandbox"] = function()
-  -- Intent: Verify that user can explicitly disable sandbox by setting
-  -- enabled = false, overriding the default true.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  tools_config.run_bash = nil
-  run_bash.setup({ sandbox = { enabled = false } })
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(false, s_opts.enabled, "enabled should be false when user overrides")
-  -- Rules from defaults should still be merged in
-  MiniTest.expect.equality("function", type(s_opts.rules.readable), "default readable rule should be preserved")
-  MiniTest.expect.equality("function", type(s_opts.rules.writable), "default writable rule should be preserved")
-end
-
-T["registration: partial rules override merges with defaults"] = function()
-  -- Intent: Verify that overriding only rules.writable still preserves
-  -- the default rules.readable from defaults.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  local custom_writable = function()
-    return { "/custom/path" }
+-- Helper to extract concatenated content from all tool output messages.
+-- Used only by multi-round tests that need full message history.
+local function extract_output_content(messages)
+  local contents = {}
+  for _, msg in ipairs(messages) do
+    table.insert(contents, msg.content)
   end
-
-  tools_config.run_bash = nil
-  run_bash.setup({ sandbox = { profile = "/some/profile.toml", rules = { writable = custom_writable } } })
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(true, s_opts.enabled, "default enabled should be true")
-  MiniTest.expect.equality(true, s_opts.profile == "/some/profile.toml", "user profile should be set")
-  MiniTest.expect.equality("function", type(s_opts.rules.readable), "default readable rule should be preserved")
-  MiniTest.expect.equality(custom_writable, s_opts.rules.writable, "user writable override should be used")
+  return table.concat(contents, "\n")
 end
 
-T["approval: run cmd requires approval in non-sandbox"] = function()
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
+-- ── Simple single-round tests (10 tests) ─────────────────────────
 
-  -- Ensure setup was called
-  if not tools_config.run_bash then
-    run_bash.setup({ sandbox = { enabled = false } })
-  end
-
-  local approval_fn = tools_config.run_bash.opts.require_approval_before
-  local tool = {
-    args = { cmd = "echo hello", action = "run" },
-    opts = { sandbox = { enabled = false } },
-  }
-  MiniTest.expect.equality(true, approval_fn(tool, {}))
-end
-
-T["approval: kill action is auto-approved"] = function()
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-  local approval_fn = tools_config.run_bash.opts.require_approval_before
-
-  local tool = {
-    args = { action = "kill", session_id = "test-123" },
-    opts = { sandbox = { enabled = false } },
-  }
-  MiniTest.expect.equality(false, approval_fn(tool, {}))
-end
-
-T["approval: default action (run) requires approval"] = function()
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-  local approval_fn = tools_config.run_bash.opts.require_approval_before
-
-  local tool = {
-    args = { cmd = "ls" },
-    opts = { sandbox = { enabled = false } },
-  }
-  MiniTest.expect.equality(true, approval_fn(tool, {}))
-end
-
--- ── Tool definition and callback ─────────────────────────────────
-
-T["tool: create returns valid tool definition"] = function()
-  local tool = require("codecompanion._extensions.run_bash.tool")
-  local def = tool.create({ enabled = false })
-
-  MiniTest.expect.equality("run_bash", def.name)
-  MiniTest.expect.equality(true, def.schema ~= nil)
-  MiniTest.expect.equality(true, #def.cmds == 1)
-  MiniTest.expect.equality(true, def.output ~= nil)
-  MiniTest.expect.equality(true, def.system_prompt ~= nil)
-
-  -- Schema has expected fields
-  local props = def.schema["function"].parameters.properties
-  MiniTest.expect.equality(true, props.cmd ~= nil)
-  MiniTest.expect.equality(true, props.action ~= nil)
-  MiniTest.expect.equality(true, props.timeout ~= nil)
-  -- No skip_sandbox since sandbox not available
-  MiniTest.expect.equality(true, props.skip_sandbox == nil)
-end
-
-T["tool: schema includes skip_sandbox when sandbox available"] = function()
-  local sandbox = require("codecompanion._extensions.run_bash.sandbox")
-
-  Helpers.require_sandbox()
-
-  local tool = require("codecompanion._extensions.run_bash.tool")
-  local path = Helpers.sandbox_profile_path()
-
-  local def = tool.create({
-    enabled = true,
-    profile = path,
-    rules = {},
+T["integration: foreground echo hello succeeds"] = function()
+  -- Intent: Verify a simple foreground command produces expected output
+  -- through the full Chat → run_bash → sandbox pipeline (non-sandbox mode).
+  Helpers.run_simple_chat_test({
+    sandbox_opts = { sandbox = { enabled = false } },
+    pre_approve = "echo hello",
+    tool_args = { cmd = "echo hello" },
+    expected_contains = { "hello" },
   })
+end
 
-  local props = def.schema["function"].parameters.properties
+T["integration: foreground false reports failure with exit code"] = function()
+  -- Intent: Verify a failing foreground command reports error status with
+  -- exit code in the chat output (non-sandbox mode).
+  Helpers.run_simple_chat_test({
+    sandbox_opts = { sandbox = { enabled = false } },
+    pre_approve = "false",
+    tool_args = { cmd = "false" },
+    expected_contains = { "Failed", "(exit:" },
+  })
+end
+
+T["integration: timeout kills long-running command"] = function()
+  -- Intent: Verify that a foreground command exceeding its timeout is
+  -- killed and the output reports the timeout (non-sandbox mode).
+  Helpers.run_simple_chat_test({
+    sandbox_opts = { sandbox = { enabled = false } },
+    pre_approve = "sleep 10",
+    tool_args = { cmd = "sleep 10", timeout = 1 },
+    expected_contains = { "timed out" },
+    timeout = 5000,
+  })
+end
+
+T["integration: background natural exit reports full output"] = function()
+  -- Intent: Verify a quick background command that exits naturally
+  -- reports its full output in the chat (non-sandbox mode).
+  Helpers.run_simple_chat_test({
+    sandbox_opts = { sandbox = { enabled = false } },
+    pre_approve = "echo done",
+    tool_args = { cmd = "echo done", bg_after = 2 },
+    expected_contains = { "done" },
+  })
+end
+
+T["integration: safe command auto-approved in sandbox"] = function()
+  -- Intent: Verify a safe command (not in blocklist) in sandbox mode
+  -- is auto-approved and produces sandbox active output.
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+    },
+    tool_args = { cmd = "echo safe" },
+    expected_contains = { "safe", Helpers.SANDBOX_ACTIVE },
+  })
+end
+
+T["integration: blocklisted command user accepts"] = function()
+  -- Intent: Verify that a blocklisted command in sandbox mode, when accepted
+  -- by the user, executes successfully with sandbox active output.
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+    },
+    mock_approval = "Accept",
+    tool_args = { cmd = "rm -rf /tmp/cc-test-nonexistent" },
+    expected_contains = { Helpers.SANDBOX_ACTIVE },
+  })
+end
+
+T["integration: blocklisted command user rejects"] = function()
+  -- Intent: Verify that a blocklisted command in sandbox mode, when rejected
+  -- by the user, produces a "User rejected" message in the chat output.
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+    },
+    mock_approval = "Reject",
+    ui_input_stub = [[vim.ui.input = function(_, cb) cb("test rejection") end]],
+    tool_args = { cmd = "rm -rf /tmp/cc-test-nonexistent" },
+    expected_contains = { "User rejected" },
+  })
+end
+
+T["integration: sandbox executes command under sandbox"] = function()
+  -- Intent: Verify that a pre-approved command in sandbox mode runs
+  -- under sandbox and produces sandbox active output.
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+    },
+    pre_approve = "echo sandboxed",
+    tool_args = { cmd = "echo sandboxed" },
+    expected_contains = { "sandboxed", Helpers.SANDBOX_ACTIVE },
+  })
+end
+
+T["integration: skip_sandbox triggers approval then bypasses sandbox"] = function()
+  -- Intent: Verify that skip_sandbox=true forces the approval prompt
+  -- and bypasses the sandbox (no sandbox active in output).
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+    },
+    mock_approval = "Accept",
+    tool_args = { cmd = "echo no-sandbox", skip_sandbox = true },
+    expected_contains = { "no-sandbox" },
+    expected_not_contains = { Helpers.SANDBOX_ACTIVE },
+  })
+end
+
+T["integration: fallback when profile missing triggers approval"] = function()
+  -- Intent: Verify that when the sandlock profile is missing, the system
+  -- falls back to requiring approval and runs without sandbox.
+  Helpers.run_simple_chat_test({
+    sandbox_opts = {
+      sandbox = { enabled = true, profile = "/nonexistent/profile.toml", rules = {} },
+    },
+    mock_approval = "Accept",
+    tool_args = { cmd = "echo fallback" },
+    expected_contains = { "fallback" },
+    expected_not_contains = { Helpers.SANDBOX_ACTIVE },
+  })
+end
+
+-- ── Multi-round tests (4 tests) ──────────────────────────────────
+
+T["integration: background mode returns session_id"] = function()
+  -- Intent: Verify that a background command returns a session_id
+  -- in the initial output and the session can be killed in a second round.
+  local child = MiniTest.new_child_neovim()
+  Helpers.child_start(child)
+  Helpers.setup_chat_with_run_bash(child, { sandbox = { enabled = false } })
+  Helpers.pre_approve_cmd(child, "echo STARTING; sleep 10")
+  Helpers.queue_tool_call_response(child, {
+    {
+      ["function"] = {
+        name = "run_bash",
+        arguments = { cmd = "echo STARTING; sleep 10", bg_after = 1 },
+      },
+      id = "call_1",
+    },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Run background command" }); chat:submit() ]]
+  )
+  local ok = Helpers.wait_for_tool_output(child)
+  MiniTest.expect.equality(true, ok, "Tool output should appear within timeout")
+  local messages = Helpers.get_tool_output_messages(child)
+  local content = extract_output_content(messages)
+  Helpers.expect_contains("STARTING", content)
+  -- Extract session_id and kill
+  local session_id = content:match("Session ID: (%S+)")
+  MiniTest.expect.equality(true, session_id ~= nil, "Should have session_id")
+  if session_id then
+    Helpers.queue_tool_call_response(child, {
+      {
+        ["function"] = {
+          name = "run_bash",
+          arguments = { action = "kill", session_id = session_id },
+        },
+        id = "call_2",
+      },
+    })
+    child.lua(
+      [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Kill session" }); chat:submit() ]]
+    )
+    Helpers.wait_for_new_tool_output(child)
+  end
+  child.stop()
+end
+
+T["integration: background kill via action=kill"] = function()
+  -- Intent: Verify that a running background command can be killed
+  -- via action=kill, and the kill output is reported in the latest message.
+  local child = MiniTest.new_child_neovim()
+  Helpers.child_start(child)
+  Helpers.setup_chat_with_run_bash(child, { sandbox = { enabled = false } })
+  -- Round 1: Start background command
+  Helpers.pre_approve_cmd(child, "sleep 100")
+  Helpers.queue_tool_call_response(child, {
+    {
+      ["function"] = { name = "run_bash", arguments = { cmd = "sleep 100", bg_after = 1 } },
+      id = "call_1",
+    },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Start background sleep" }); chat:submit() ]]
+  )
+  local ok = Helpers.wait_for_tool_output(child)
+  MiniTest.expect.equality(true, ok, "Tool output should appear within timeout")
+  local messages = Helpers.get_tool_output_messages(child)
+  local content = extract_output_content(messages)
+  local session_id = content:match("Session ID: (%S+)")
+  MiniTest.expect.equality(true, session_id ~= nil, "Should have session_id")
+  -- Round 2: Kill the session (kill is synchronous — message added inside submit)
+  if session_id then
+    -- Count tool messages before submit to verify new output later
+    local before_count = child.lua([[local chat = _G._test_chat; local n = 0
+      for _, m in ipairs(chat.messages) do
+        if m.role == 'tool' and m.content and m.content ~= '' then n = n + 1 end
+      end; return n]])
+    Helpers.queue_tool_call_response(child, {
+      {
+        ["function"] = {
+          name = "run_bash",
+          arguments = { action = "kill", session_id = session_id },
+        },
+        id = "call_2",
+      },
+    })
+    child.lua(
+      [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Kill the background session" }); chat:submit() ]]
+    )
+    MiniTest.expect.equality(true, child.lua([[local chat = _G._test_chat; local n = 0
+        for _, m in ipairs(chat.messages) do
+          if m.role == 'tool' and m.content and m.content ~= '' then n = n + 1 end
+        end; return n]]) > before_count, "Kill should produce a new tool message")
+    local content2 = Helpers.get_latest_tool_output_content(child)
+    Helpers.expect_contains("Killed", content2)
+  end
+  child.stop()
+end
+
+T["integration: blocklisted command always accept cached on second call"] = function()
+  -- Intent: Verify that "Always accept" caches the approval decision:
+  -- the mock approval is called only once across two tool calls.
+  Helpers.require_sandbox()
+  local child = MiniTest.new_child_neovim()
+  Helpers.child_start(child)
+  Helpers.mock_approval_prompt(child)
+  Helpers.set_approval_choice(child, "Always accept")
+  local profile = Helpers.sandbox_profile_path()
+  Helpers.setup_chat_with_run_bash(
+    child,
+    { sandbox = { enabled = true, profile = profile, rules = {} } }
+  )
+  -- Round 1
+  Helpers.queue_tool_call_response(child, {
+    {
+      ["function"] = { name = "run_bash", arguments = { cmd = "rm -rf /tmp/cc-test-nonexistent" } },
+      id = "call_1",
+    },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Run rm -rf first time" }); chat:submit() ]]
+  )
+  local ok = Helpers.wait_for_new_tool_output(child)
+  MiniTest.expect.equality(true, ok, "First tool output should appear within timeout")
+  Helpers.expect_tool_output_contains(child, Helpers.SANDBOX_ACTIVE)
+  -- Round 2
+  Helpers.queue_tool_call_response(child, {
+    {
+      ["function"] = { name = "run_bash", arguments = { cmd = "rm -rf /tmp/cc-test-nonexistent" } },
+      id = "call_2",
+    },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Run rm -rf second time" }); chat:submit() ]]
+  )
+  ok = Helpers.wait_for_new_tool_output(child)
+  MiniTest.expect.equality(true, ok, "Second tool output should appear within timeout")
+  Helpers.expect_tool_output_contains(child, Helpers.SANDBOX_ACTIVE)
+  MiniTest.expect.equality(
+    1,
+    child.lua([[return _G._mock_approval_call_count]]),
+    "Mock approval should be called once (cached on second call)"
+  )
+  child.stop()
+end
+
+T["integration: write to denied path blocked by sandbox"] = function()
+  -- Intent: Verify that writing to a path denied by the sandlock profile
+  -- produces a permission error with sandbox active in the output.
+  Helpers.require_sandbox()
+  local test_dir = "/tmp/cc-run-bash-test-deny"
+  vim.fn.mkdir(test_dir, "p")
+  local child = MiniTest.new_child_neovim()
+  Helpers.child_start(child)
+  local profile = Helpers.sandbox_profile_path()
+  Helpers.setup_chat_with_run_bash(
+    child,
+    { sandbox = { enabled = true, profile = profile, rules = {} } }
+  )
+  Helpers.pre_approve_cmd(
+    child,
+    "mkdir -p /tmp/cc-run-bash-test-deny; touch /tmp/cc-run-bash-test-deny/test 2>&1"
+  )
+  Helpers.queue_tool_call_response(child, {
+    {
+      ["function"] = {
+        name = "run_bash",
+        arguments = {
+          cmd = "mkdir -p /tmp/cc-run-bash-test-deny; touch /tmp/cc-run-bash-test-deny/test 2>&1",
+        },
+      },
+      id = "call_1",
+    },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Try to write to denied path" }); chat:submit() ]]
+  )
+  local ok = Helpers.wait_for_tool_output(child)
+  MiniTest.expect.equality(true, ok, "Tool output should appear within timeout")
+  local messages = Helpers.get_tool_output_messages(child)
+  local content = extract_output_content(messages)
   MiniTest.expect.equality(
     true,
-    props.skip_sandbox ~= nil,
-    "should have skip_sandbox when sandbox available"
+    content:find("Permission denied") ~= nil
+      or content:find("Operation not permitted") ~= nil
+      or content:find("Failed") ~= nil,
+    "Should contain permission error or failure status"
   )
-end
-
--- ── Command execution (tool handler test) ────────────────────────
-
-T["execution: echo hello produces output via handler"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  -- Execute the handler
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, { cmd = "echo hello" }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  -- Wait for async execution to complete
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok, "handler should complete within 5s")
-  MiniTest.expect.equality(true, output_data ~= nil)
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    local output_text = d.output or ""
-    Helpers.expect_contains("hello", output_text)
-  end
-end
-
-T["execution: false (exit 1) reports failure"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, { cmd = "false" }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok)
-  MiniTest.expect.equality(true, output_data ~= nil)
-
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-  end
-end
-
-T["execution: kill nonexistent session returns error"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    action = "kill",
-    session_id = "nonexistent-999",
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil, "should respond immediately")
-  if output_data then
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("session not found", error_msg)
-  end
-end
-
-T["execution: bg_after > 60 returns error"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "echo hello",
-    bg_after = 61,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("bg_after", error_msg)
-  end
-end
-
-T["execution: timeout > 3600 returns error"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "echo hello",
-    timeout = 3601,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("Timeout", error_msg)
-  end
-end
-
-T["execution: empty cmd returns error"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "",
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-  end
-end
-
--- ── Blocklist approval via require_approval_before (sandbox mode) ─
-
-T["blocklist: rm -rf blocked in sandbox mode"] = function()
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-  local approval_fn = tools_config.run_bash.opts.require_approval_before
-
-  -- Only test if sandlock and profile are available
-  local profile = Helpers.sandbox_profile_path()
-  Helpers.require_sandbox()
-
-  local tool = {
-    args = { cmd = "rm -rf /tmp/test", skip_sandbox = false },
-    opts = {
-      sandbox = { enabled = true, profile = profile },
-    },
-  }
-  MiniTest.expect.equality(true, approval_fn(tool, {}))
-end
-
-T["blocklist: git status safe in sandbox mode"] = function()
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-  local approval_fn = tools_config.run_bash.opts.require_approval_before
-
-  local profile = Helpers.sandbox_profile_path()
-  Helpers.require_sandbox()
-
-  local tool = {
-    args = { cmd = "git status", skip_sandbox = false },
-    opts = {
-      sandbox = { enabled = true, profile = profile },
-    },
-  }
-  MiniTest.expect.equality(false, approval_fn(tool, {}))
-end
-
--- ── Timeout and background execution ──────────────────────────────
-
-T["execution: timeout kills long-running command"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "sleep 10",
-    timeout = 1,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok, "should complete within 5s (timeout=1s + cleanup)")
-  MiniTest.expect.equality(true, output_data ~= nil)
-
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local d = Helpers.unwrap_cb_data(output_data)
-    MiniTest.expect.equality(true, d.timed_out == true, "should be marked as timed out")
-  end
-end
-
-T["execution: background mode returns session_id"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "echo STARTING; sleep 3",
-    bg_after = 1,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok, "should return within 5s (bg_after=1s)")
-  MiniTest.expect.equality(true, output_data ~= nil)
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    MiniTest.expect.equality(true, d.bg_running == true, "should be bg_running")
-    MiniTest.expect.equality(true, d.session_id ~= nil, "should have session_id")
-    MiniTest.expect.equality(true, d.file_path ~= nil, "should have file_path")
-    Helpers.expect_contains("STARTING", d.output)
-
-    -- Clean up: kill the background session
-    handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-      action = "kill",
-      session_id = d.session_id,
-    }, {
-      output_cb = function() end,
-    })
-  end
-end
-
-T["execution: bg quick exit returns full output"] = function()
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "echo done",
-    bg_after = 2,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok, "should return within 5s (bg_after=2s)")
-  MiniTest.expect.equality(true, output_data ~= nil)
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    MiniTest.expect.equality(true, d.bg_exited == true, "should be bg_exited")
-    MiniTest.expect.equality(0, d.exit_code, "should have exit code 0")
-    Helpers.expect_contains("done", d.output)
-  end
-end
-
-T["execution: bg session cleaned up after natural exit"] = function()
-  -- Intent: Verify that after a background command exits naturally,
-  -- the session entry is cleaned up and the temp file is removed.
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-
-  local output_data = nil
-  local handler = def.cmds[1]
-
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    cmd = "echo done",
-    bg_after = 1,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  -- Wait for timer to fire (bg_after=1s) and report output
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-  MiniTest.expect.equality(true, ok, "should return within 5s")
-
-  if not output_data then
-    return
-  end
-
-  local d = Helpers.unwrap_cb_data(output_data)
-  MiniTest.expect.equality(true, d.bg_exited == true, "should be bg_exited")
-  local file_path = d.file_path
-  local session_id = d.session_id
-  MiniTest.expect.equality(true, file_path ~= nil, "exited output should include file_path")
-  MiniTest.expect.equality(true, session_id ~= nil, "exited output should include session_id")
-
-  -- Session should be cleaned up: kill attempt returns "session not found"
-  local kill_output = nil
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    action = "kill",
-    session_id = session_id,
-  }, {
-    output_cb = function(data)
-      kill_output = data
-    end,
-  })
-
-  if kill_output then
-    local error_msg = (kill_output.data and kill_output.data.error) or ""
-    Helpers.expect_contains("session not found", error_msg)
-  end
-
-  -- Temp file should be removed
-  if file_path then
-    MiniTest.expect.equality(true, vim.uv.fs_stat(file_path) == nil, "temp file should be removed")
-  end
-end
-
--- ── Sandbox execution integration tests ──────────────
-
-T["execution: sandbox mode executes command"] = function()
-  -- Intent: Verify that when sandlock is available, the handler correctly
-  -- executes commands under sandbox with sandbox_active=true.
-  local profile = Helpers.sandbox_profile_path()
-  Helpers.require_sandbox()
-
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = true, profile = profile, rules = {} })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({ tool = { opts = { sandbox = { enabled = true, profile = profile, rules = {} } } } }, {
-    cmd = "echo sandboxed",
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-  MiniTest.expect.equality(true, ok, "should complete within 5s")
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    Helpers.expect_contains("sandboxed", d.output)
-    MiniTest.expect.equality(true, d.sandbox_active == true, "sandbox should be active")
-  end
-end
-
-T["execution: skip_sandbox bypasses sandbox"] = function()
-  -- Intent: Verify that skip_sandbox=true bypasses the sandbox even when
-  -- sandbox is available.
-  local profile = Helpers.sandbox_profile_path()
-  Helpers.require_sandbox()
-
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = true, profile = profile, rules = {} })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({ tool = { opts = { sandbox = { enabled = true, profile = profile, rules = {} } } } }, {
-    cmd = "echo no-sandbox",
-    skip_sandbox = true,
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-  MiniTest.expect.equality(true, ok, "should complete within 5s")
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    Helpers.expect_contains("no-sandbox", d.output)
-    MiniTest.expect.equality(true, d.sandbox_active == false, "sandbox should NOT be active")
-  end
-end
-
--- ── Missing required-parameter error tests ────────────────
-
-T["execution: kill without session_id returns error"] = function()
-  -- Intent: Verify handler returns proper error when session_id is missing
-  -- for action='kill'.
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    action = "kill",
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("session not found", error_msg)
-  end
-end
-
-T["execution: run without cmd returns error"] = function()
-  -- Intent: Verify handler returns proper error when cmd is missing
-  -- for action='run'.
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
-    action = "run",
-  }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("cmd is required", error_msg)
-  end
-end
-
-T["execution: no action defaults to run and requires cmd"] = function()
-  -- Intent: Verify handler defaults to action='run' and returns error when
-  -- cmd is missing.
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = false })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {}, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  MiniTest.expect.equality(true, output_data ~= nil)
-  if output_data then
-    MiniTest.expect.equality("error", output_data.status)
-    local error_msg = (output_data.data and output_data.data.error) or ""
-    Helpers.expect_contains("cmd is required", error_msg)
-  end
-end
-
--- ── Invalid sandbox profile error path ────────────────────
-
-T["execution: invalid sandbox profile falls back to non-sandbox"] = function()
-  -- Intent: Verify that when a non-existent sandbox profile is configured,
-  -- execution gracefully falls back to non-sandbox mode.
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local def = tool_mod.create({ enabled = true, profile = "/nonexistent/profile.toml", rules = {} })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({
-    tool = {
-      opts = { sandbox = { enabled = true, profile = "/nonexistent/profile.toml", rules = {} } },
-    },
-  }, { cmd = "echo fallback" }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-  MiniTest.expect.equality(true, ok, "should complete within 5s")
-
-  if output_data then
-    local d = Helpers.unwrap_cb_data(output_data)
-    Helpers.expect_contains("fallback", d.output)
-    MiniTest.expect.equality(true, d.sandbox_active == false, "should fall back to non-sandbox")
-  end
-end
-
--- ── Extra args configuration ─────────────────────────────────────
-
-T["config: extra_args merged correctly"] = function()
-  -- Intent: Verify that extra_args from user config is correctly merged
-  -- into sandbox_opts via vim.tbl_deep_extend.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  tools_config.run_bash = nil
-  run_bash.setup({
-    sandbox = {
-      enabled = true,
-      extra_args = { "--allow-degraded", "signal-scope" },
-    },
-  })
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(true, s_opts.enabled ~= nil, "enabled should be present")
-  MiniTest.expect.equality(true, s_opts.extra_args ~= nil, "extra_args should be present")
-  MiniTest.expect.equality(2, #s_opts.extra_args, "extra_args should have 2 elements")
-  MiniTest.expect.equality("--allow-degraded", s_opts.extra_args[1])
-  MiniTest.expect.equality("signal-scope", s_opts.extra_args[2])
-end
-
-T["config: extra_args empty when not configured"] = function()
-  -- Intent: Verify that when extra_args is not configured, it remains nil.
-  local run_bash = require("codecompanion._extensions.run_bash")
-  local tools_config = require("codecompanion.config").interactions.chat.tools
-
-  tools_config.run_bash = nil
-  run_bash.setup({
-    sandbox = {
-      enabled = true,
-    },
-  })
-
-  local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(nil, s_opts.extra_args, "extra_args should be nil when not configured")
-end
-
-T["integration: extra_args with sandbox"] = function()
-  -- Intent: Verify that extra_args are correctly passed through the entire
-  -- tool call flow when sandbox is available.
-  local profile = Helpers.sandbox_profile_path()
-  Helpers.require_sandbox()
-
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-  local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
-
-  -- Spy on sandbox.run to capture the args
-  local orig_run = sandbox_mod.run
-  local captured_sandbox_opts = nil
-  sandbox_mod.run = function(sandbox_opts, exec_params)
-    captured_sandbox_opts = sandbox_opts
-    return orig_run(sandbox_opts, exec_params)
-  end
-
-  local def = tool_mod.create({
-    enabled = true,
-    profile = profile,
-    rules = {},
-    extra_args = { "--allow-degraded", "signal-scope" },
-  })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({
-    tool = {
-      opts = {
-        sandbox = {
-          enabled = true,
-          profile = profile,
-          rules = {},
-          extra_args = { "--allow-degraded", "signal-scope" },
-        },
-      },
-    },
-  }, { cmd = "echo extra-args-test" }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  -- Restore original sandbox.run
-  sandbox_mod.run = orig_run
-
-  MiniTest.expect.equality(true, ok, "should complete within 5s")
-  MiniTest.expect.equality(true, captured_sandbox_opts ~= nil, "sandbox_opts should be captured")
-  if captured_sandbox_opts then
-    MiniTest.expect.equality(true, captured_sandbox_opts.extra_args ~= nil, "extra_args should be present")
-    MiniTest.expect.equality(2, #captured_sandbox_opts.extra_args, "extra_args should have 2 elements")
-  end
-end
-
-T["integration: extra_args ignored when sandbox unavailable"] = function()
-  -- Intent: Verify that extra_args are ignored when sandbox is not available
-  -- (e.g., sandlock not installed or sandbox disabled).
-  local tool_mod = require("codecompanion._extensions.run_bash.tool")
-
-  local def = tool_mod.create({
-    enabled = false, -- sandbox disabled
-    extra_args = { "--allow-degraded", "signal-scope" },
-  })
-  local handler = def.cmds[1]
-
-  local output_data = nil
-  handler({
-    tool = {
-      opts = {
-        sandbox = {
-          enabled = false,
-          extra_args = { "--allow-degraded", "signal-scope" },
-        },
-      },
-    },
-  }, { cmd = "echo no-sandbox" }, {
-    output_cb = function(data)
-      output_data = data
-    end,
-  })
-
-  local ok = vim.wait(5000, function()
-    return output_data ~= nil
-  end, 50)
-
-  MiniTest.expect.equality(true, ok, "should complete within 5s")
-  MiniTest.expect.equality("success", output_data.status, "command should succeed")
-  Helpers.expect_contains("no-sandbox", output_data.data.output)
-  -- Ensure no sandlock errors
-  local has_sandlock = output_data.data.output:find("sandlock", 1, true) ~= nil
-  MiniTest.expect.equality(false, has_sandlock, "output should not contain sandlock errors")
+  Helpers.expect_contains(Helpers.SANDBOX_ACTIVE, content)
+  pcall(vim.fn.delete, test_dir, "rf")
+  child.stop()
 end
 
 return T

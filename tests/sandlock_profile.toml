@@ -7,7 +7,7 @@ write = [
     "/tmp", "/var/tmp",
     "/dev/null",
 ]
-deny = ["/root", "/sys", "/proc/sys", "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"]
+deny = ["/root", "/sys", "/proc/sys", "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d", "/tmp/cc-run-bash-test-deny"]
 
 [network]
 allow = ["tcp://*:*", "udp://*:53", "icmp://*"]

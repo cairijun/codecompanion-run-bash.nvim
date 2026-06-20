@@ -83,18 +83,8 @@ function Helpers.queue_mock_http_response(child, response)
   child.lua([[_G.mock_client:queue_response(...)]], { response })
 end
 
----Setup a chat buffer with run_bash tools for integration testing
----@param child table MiniTest child neovim instance
----@param opts? table Optional config: { sandbox?: table, blocklist?: table }
----@return string chat_var The variable name where chat is stored ("_G._test_chat")
-function Helpers.setup_chat_with_run_bash(child, opts)
-  opts = opts or {}
-
-  -- Define adapter inline in child process (functions can't cross process boundary)
-  child.lua(
-    [[
-    local sandbox_opts, blocklist_opts = ...
-
+local function adapter_code()
+  return [[
     -- Define custom adapter for tool_calls
     local adapter = {
       name = "test_adapter_for_run_bash",
@@ -133,6 +123,19 @@ function Helpers.setup_chat_with_run_bash(child, opts)
         },
       },
     }
+]]
+end
+
+---Setup a chat buffer with run_bash tools for integration testing
+---@param child table MiniTest child neovim instance
+---@param opts? table Optional config: { sandbox?: table, blocklist?: table }
+---@return string chat_var The variable name where chat is stored ("_G._test_chat")
+function Helpers.setup_chat_with_run_bash(child, opts)
+  opts = opts or {}
+
+  child.lua([[
+    local sandbox_opts, blocklist_opts = ...
+]] .. adapter_code() .. [[
 
     -- Setup CodeCompanion with run_bash extension
     local config = require("tests.config")
@@ -145,6 +148,11 @@ function Helpers.setup_chat_with_run_bash(child, opts)
       },
     }
     require("codecompanion").setup(config)
+
+    -- Disable auto re-submit after tool completion (default true)
+    local cc_config = require("codecompanion.config")
+    cc_config.interactions.chat.tools.opts.auto_submit_success = false
+    cc_config.interactions.chat.tools.opts.auto_submit_errors = false
 
     -- Create chat buffer
     local Chat = require("codecompanion.interactions.chat")
@@ -164,9 +172,7 @@ function Helpers.setup_chat_with_run_bash(child, opts)
     end
 
     _G._test_chat = chat
-  ]],
-    { opts.sandbox, opts.blocklist }
-  )
+  ]], { opts.sandbox, opts.blocklist })
 
   -- Mock HTTP client
   Helpers.mock_http(child, "_G._test_chat.adapter")
@@ -234,6 +240,42 @@ function Helpers.get_tool_output_messages(child, chat_var)
   )) or {}
 end
 
+---Get the content of the LAST tool message in chat (current round only).
+---Use in multi-round tests where get_tool_output_messages returns concatenated output.
+---@param child table MiniTest child neovim instance
+---@param chat_var? string Chat variable name (default: "_G._test_chat")
+---@return string content The content field of the last tool message, or "" if none
+function Helpers.get_latest_tool_output_content(child, chat_var)
+  chat_var = chat_var or "_G._test_chat"
+
+  return child.lua(string.format(
+    [[
+    local chat = %s
+    if not chat or not chat.messages then
+      return ""
+    end
+    for i = #chat.messages, 1, -1 do
+      local msg = chat.messages[i]
+      if msg.role == "tool" and msg.content and msg.content ~= "" then
+        return msg.content
+      end
+    end
+    return ""
+  ]],
+    chat_var
+  )) or ""
+end
+
+---Assert that the latest tool output contains a substring.
+---Combines get_latest_tool_output_content + expect_contains into one call.
+---@param child table MiniTest child neovim instance
+---@param expected string Substring expected in latest tool output
+---@param chat_var? string Chat variable name (default: "_G._test_chat")
+function Helpers.expect_tool_output_contains(child, expected, chat_var)
+  local content = Helpers.get_latest_tool_output_content(child, chat_var)
+  Helpers.expect_contains(expected, content)
+end
+
 ---Resolve the sandbox profile path for tests.
 ---Uses the in-repo profile bound to the test suite.
 ---@return string
@@ -264,6 +306,211 @@ function Helpers.require_sandbox()
   then
     error("sandlock or profile not available; set SKIP_SANDBOX_TESTS=1 to skip sandbox tests")
   end
+end
+
+---Replace interactive approval prompt UI with a programmable mock
+---Must be called BEFORE setup_chat_with_run_bash
+---@param child table MiniTest child neovim instance
+function Helpers.mock_approval_prompt(child)
+  child.lua([[
+    _G._mock_approval_choice = "Accept"
+    _G._mock_approval_call_count = 0
+
+    local mock_approval = {
+      request = function(chat, opts)
+        _G._mock_approval_call_count = _G._mock_approval_call_count + 1
+        for _, c in ipairs(opts.choices) do
+          if c.label == _G._mock_approval_choice then
+            c.callback()
+            return function() end  -- dummy on_done
+          end
+        end
+        error("MockApprovalPrompt: no choice matching '" .. _G._mock_approval_choice .. "'")
+      end,
+    }
+
+    package.loaded["codecompanion.interactions.chat.helpers.approval_prompt"] = mock_approval
+  ]])
+end
+
+---Configure which approval prompt choice the mock should simulate
+---Must be called AFTER `mock_approval_prompt` — the mock reads `_G._mock_approval_choice` at request time, so the choice must be set before the tool call triggers the approval flow.
+---@param child table MiniTest child neovim instance
+---@param choice string One of: "Accept", "Reject", "Always accept", "Cancel"
+function Helpers.set_approval_choice(child, choice)
+  child.lua([[_G._mock_approval_choice = ...]], { choice })
+end
+
+---Pre-approve a command via Approvals:always() to skip approval prompt entirely
+---Must be called AFTER setup_chat_with_run_bash (needs chat.bufnr)
+---@param child table MiniTest child neovim instance
+---@param cmd string Exact command to pre-approve
+---@param chat_var? string Chat variable name (default: "_G._test_chat")
+function Helpers.pre_approve_cmd(child, cmd, chat_var)
+  chat_var = chat_var or "_G._test_chat"
+  child.lua(
+    string.format(
+      [[
+    local cmd = ...
+    local Approvals = require("codecompanion.interactions.chat.tools.approvals")
+    Approvals:always(%s.bufnr, { tool_name = "run_bash", cmd = cmd })
+  ]],
+      chat_var
+    ),
+    { cmd }
+  )
+end
+
+---Wait for tool output messages to appear in chat after command execution
+---Must be called AFTER chat:submit()
+---@param child table MiniTest child neovim instance
+---@param chat_var? string Chat variable name (default: "_G._test_chat")
+---@param timeout? number Timeout in milliseconds (default: 5000)
+---@return boolean success Whether tool messages found within timeout
+function Helpers.wait_for_tool_output(child, chat_var, timeout)
+  chat_var = chat_var or "_G._test_chat"
+  timeout = timeout or 5000
+
+  return child.lua(string.format(
+    [[
+    local chat = %s
+    return vim.wait(%d, function()
+      if not chat or not chat.messages then
+        return false
+      end
+      for _, msg in ipairs(chat.messages) do
+        if msg.role == "tool" and msg.content and msg.content ~= "" then
+          return true
+        end
+      end
+      return false
+    end)
+  ]],
+    chat_var,
+    timeout
+  ))
+end
+
+---Wait for NEW tool output messages to appear (counts messages at call time, waits for increase).
+---Use in multi-round tests where stale messages from previous rounds cause false-positives.
+---Must be called AFTER chat:submit()
+---@param child table MiniTest child neovim instance
+---@param chat_var? string Chat variable name (default: "_G._test_chat")
+---@param timeout? number Timeout in milliseconds (default: 5000)
+---@return boolean success Whether new tool messages found within timeout
+function Helpers.wait_for_new_tool_output(child, chat_var, timeout)
+  chat_var = chat_var or "_G._test_chat"
+  timeout = timeout or 5000
+
+  return child.lua(string.format(
+    [[
+    local chat = %s
+    if not chat or not chat.messages then
+      return false
+    end
+
+    -- Count current tool messages with non-empty content
+    local before_count = 0
+    for _, msg in ipairs(chat.messages) do
+      if msg.role == "tool" and msg.content and msg.content ~= "" then
+        before_count = before_count + 1
+      end
+    end
+
+    -- Wait for count to increase
+    return vim.wait(%d, function()
+      local current_count = 0
+      for _, msg in ipairs(chat.messages) do
+        if msg.role == "tool" and msg.content and msg.content ~= "" then
+          current_count = current_count + 1
+        end
+      end
+      return current_count > before_count
+    end)
+  ]],
+    chat_var,
+    timeout
+  ))
+end
+
+-- Shared constant to avoid magic string duplication across tests
+Helpers.SANDBOX_ACTIVE = "Sandbox active"
+
+---Assert that output contains the sandbox active note
+---@param content string Output content to check
+function Helpers.expect_sandbox_active(content)
+  Helpers.expect_contains(Helpers.SANDBOX_ACTIVE, content)
+end
+
+---Run a simple single-round chat test with the common pipeline.
+---Encapsulates: child start → setup chat → pre-approve/mock-approve → queue response → submit → wait → check.
+---@param opts table
+---@param opts.sandbox_opts table Passed to setup_chat_with_run_bash
+---@param opts.pre_approve? string Command to pre-approve via pre_approve_cmd
+---@param opts.mock_approval? string Approval choice ("Accept", "Reject", "Always accept", "Cancel")
+---@param opts.ui_input_stub? string Lua code for vim.ui.input override, applied AFTER setup_chat_with_run_bash
+---@param opts.tool_args table Arguments for run_bash tool call
+---@param opts.expected_contains string[] Substrings expected in tool output
+---@param opts.expected_not_contains? string[] Substrings that should NOT appear
+---@param opts.timeout? number Wait timeout in ms (default 5000)
+function Helpers.run_simple_chat_test(opts)
+  local sandbox_opts = opts.sandbox_opts or {}
+  if sandbox_opts.sandbox and sandbox_opts.sandbox.enabled then
+    Helpers.require_sandbox()
+  end
+
+  local child = MiniTest.new_child_neovim()
+  Helpers.child_start(child)
+
+  -- Mock approval setup (must be BEFORE setup_chat_with_run_bash)
+  if opts.mock_approval then
+    Helpers.mock_approval_prompt(child)
+    Helpers.set_approval_choice(child, opts.mock_approval)
+  end
+
+  Helpers.setup_chat_with_run_bash(child, sandbox_opts)
+
+  -- vim.ui.input stub applied AFTER setup (prevents setup() from overwriting)
+  if opts.ui_input_stub then
+    child.lua(opts.ui_input_stub)
+  end
+
+  -- Pre-approve command (must be AFTER setup_chat_with_run_bash)
+  if opts.pre_approve then
+    Helpers.pre_approve_cmd(child, opts.pre_approve)
+  end
+
+  -- Queue tool call and submit
+  Helpers.queue_tool_call_response(child, {
+    { ["function"] = { name = "run_bash", arguments = opts.tool_args }, id = "call_1" },
+  })
+  child.lua(
+    [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Run command" }); chat:submit() ]]
+  )
+
+  -- Wait for tool output
+  local timeout = opts.timeout or 5000
+  local ok = Helpers.wait_for_tool_output(child, nil, timeout)
+  MiniTest.expect.equality(true, ok, "Tool output should appear within timeout")
+
+  -- Check expected content
+  for _, expected in ipairs(opts.expected_contains or {}) do
+    Helpers.expect_tool_output_contains(child, expected)
+  end
+
+  -- Check unexpected content
+  if opts.expected_not_contains then
+    local content = Helpers.get_latest_tool_output_content(child)
+    for _, not_expected in ipairs(opts.expected_not_contains) do
+      MiniTest.expect.equality(
+        nil,
+        content:find(not_expected, 1, true),
+        "should NOT contain '" .. not_expected .. "'"
+      )
+    end
+  end
+
+  child.stop()
 end
 
 return Helpers

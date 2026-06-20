@@ -450,9 +450,27 @@ end
 do
   local sandbox = require("codecompanion._extensions.run_bash.sandbox")
 
-  T["spy: sandbox mode passes sandlock as executable"] = function()
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
+  -- profile_path must be defined here — the sandbox mode do...end block above
+  -- has its own scope and profile_path doesn't leak into this block.
+  local profile_path = Helpers.sandbox_profile_path()
+
+  local orig_spawn = uv.spawn
+  local orig_unref = uv.unref
+  local orig_close = uv.close
+  local orig_os_execute = os.execute
+
+  local spy_set = MiniTest.new_set({
+    hooks = {
+      post = function()
+        uv.spawn = orig_spawn
+        uv.unref = orig_unref
+        uv.close = orig_close
+        os.execute = orig_os_execute
+      end,
+    },
+  })
+
+  spy_set["spy: sandbox mode passes sandlock as executable"] = function()
     local captured_exe = nil
     local captured_args = nil
 
@@ -486,16 +504,11 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality("sandlock", captured_exe)
     MiniTest.expect.equality(true, captured_exe ~= nil)
   end
 
-  T["spy: sandbox args contain profile and rules flags"] = function()
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
+  spy_set["spy: sandbox args contain profile and rules flags"] = function()
     local captured_args = nil
 
     uv.unref = function() end
@@ -527,9 +540,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, captured_args ~= nil)
     -- Check for key flags
     local args_str = table.concat(captured_args or {}, " ")
@@ -542,9 +552,7 @@ do
     Helpers.expect_contains("/home", args_str)
   end
 
-  T["spy: non-sandbox mode passes bash"] = function()
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
+  spy_set["spy: non-sandbox mode passes bash"] = function()
     local captured_exe = nil
     local captured_args = nil
 
@@ -564,18 +572,13 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality("bash", captured_exe)
     MiniTest.expect.equality(true, captured_args ~= nil)
     MiniTest.expect.equality("-c", (captured_args or {})[1])
     MiniTest.expect.equality("echo hi", (captured_args or {})[2])
   end
 
-  T["spy: rules functions are called and expanded"] = function()
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
+  spy_set["spy: rules functions are called and expanded"] = function()
     local w_called = false
     local r_called = false
     local captured_args = nil
@@ -611,9 +614,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, w_called, "writable function should be called")
     MiniTest.expect.equality(true, r_called, "readable function should be called")
 
@@ -623,11 +623,9 @@ do
     Helpers.expect_contains("/home/x", args_str)
   end
 
-  T["spy: nil-returning rule does not crash"] = function()
+  spy_set["spy: nil-returning rule does not crash"] = function()
     -- Intent: Verify that expand_rule handles a rule function returning nil
     -- without crashing, instead producing an empty args list (no -w/-r flags).
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
     local captured_args = nil
 
     uv.unref = function() end
@@ -659,9 +657,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, ok, "should not crash: " .. tostring(err))
     MiniTest.expect.equality(true, captured_args ~= nil)
     -- No standalone -w or -r flags should be present (expand_rule returned empty)
@@ -679,14 +674,9 @@ do
     MiniTest.expect.equality(true, not has_r_flag, "should not have -r flag")
   end
 
-  T["spy: kill uses uv.spawn array, not os.execute string"] = function()
+  spy_set["spy: kill uses uv.spawn array, not os.execute string"] = function()
     -- Intent: Verify that sandbox.kill passes arguments as an array to uv.spawn
     -- rather than building a shell command string, preventing shell injection.
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
-    local orig_close = uv.close
-    local orig_os_execute = os.execute
-
     local spawn_called = false
     local captured_exe = nil
     local captured_args = nil
@@ -710,11 +700,6 @@ do
     local malicious_name = "'; rm -rf /; echo '"
     sandbox.kill(malicious_name, 12345)
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-    uv.close = orig_close
-    os.execute = orig_os_execute
-
     MiniTest.expect.equality(true, not os_execute_called, "os.execute must NOT be called")
     MiniTest.expect.equality(true, spawn_called, "uv.spawn should be called")
     MiniTest.expect.equality("sandlock", captured_exe)
@@ -725,12 +710,9 @@ do
     end
   end
 
-  T["spy: mocks properly restored after test"] = function()
+  spy_set["spy: mocks properly restored after test"] = function()
     -- Intent: Verify that spy tests properly restore uv.spawn and uv.unref,
     -- preventing test cross-contamination.
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
-
     uv.unref = function() end
     uv.spawn = function(exe, opts, on_exit)
       return {}, 88888
@@ -751,11 +733,9 @@ do
     MiniTest.expect.equality(orig_unref, uv.unref, "uv.unref should be restored")
   end
 
-  T["spy: consecutive spy tests don't contaminate"] = function()
+  spy_set["spy: consecutive spy tests don't contaminate"] = function()
     -- Intent: Verify that two consecutive spy tests don't interfere,
     -- each capturing its own mock values independently.
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
 
     -- First spy test
     local first_cmd = nil
@@ -803,10 +783,8 @@ do
     MiniTest.expect.equality(orig_spawn, uv.spawn, "uv.spawn restored after second test")
   end
 
-  T["spy: extra_args passed to sandlock"] = function()
+  spy_set["spy: extra_args passed to sandlock"] = function()
     -- Intent: Verify extra_args are inserted into sandlock args before `--`
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
     local captured_args = nil
 
     uv.unref = function() end
@@ -838,9 +816,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, captured_args ~= nil)
     local args_str = table.concat(captured_args or {}, " ")
     Helpers.expect_contains("--allow-degraded", args_str)
@@ -859,14 +834,16 @@ do
     MiniTest.expect.equality(true, dash_dash_idx ~= nil, "should have -- separator")
     MiniTest.expect.equality(true, degraded_idx ~= nil, "should have --allow-degraded")
     if dash_dash_idx and degraded_idx then
-      MiniTest.expect.equality(true, degraded_idx < dash_dash_idx, "extra_args should appear before --")
+      MiniTest.expect.equality(
+        true,
+        degraded_idx < dash_dash_idx,
+        "extra_args should appear before --"
+      )
     end
   end
 
-  T["spy: extra_args nil adds nothing"] = function()
+  spy_set["spy: extra_args nil adds nothing"] = function()
     -- Intent: Verify that when extra_args is nil, no extra args are added
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
     local captured_args = nil
 
     uv.unref = function() end
@@ -897,9 +874,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, captured_args ~= nil)
     local args_str = table.concat(captured_args or {}, " ")
     -- Should not contain any extra_args-related content
@@ -907,10 +881,8 @@ do
     MiniTest.expect.equality(false, has_degraded, "should not have --allow-degraded")
   end
 
-  T["spy: extra_args empty table adds nothing"] = function()
+  spy_set["spy: extra_args empty table adds nothing"] = function()
     -- Intent: Verify that when extra_args is an empty table, no extra args are added
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
     local captured_args = nil
 
     uv.unref = function() end
@@ -942,9 +914,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, captured_args ~= nil)
     -- Verify the args structure is correct (no extra elements)
     -- The args should end with: ... -r /home -- bash -c echo hi
@@ -952,10 +921,8 @@ do
     Helpers.expect_contains("-- bash -c echo hi", args_str)
   end
 
-  T["spy: extra_args multiple args"] = function()
+  spy_set["spy: extra_args multiple args"] = function()
     -- Intent: Verify that multiple extra_args are all added correctly
-    local orig_spawn = uv.spawn
-    local orig_unref = uv.unref
     local captured_args = nil
 
     uv.unref = function() end
@@ -987,9 +954,6 @@ do
       on_exit = function() end,
     })
 
-    uv.spawn = orig_spawn
-    uv.unref = orig_unref
-
     MiniTest.expect.equality(true, captured_args ~= nil)
     local args_str = table.concat(captured_args or {}, " ")
     Helpers.expect_contains("--allow-degraded", args_str)
@@ -997,6 +961,8 @@ do
     Helpers.expect_contains("--disable", args_str)
     Helpers.expect_contains("signal-scope", args_str)
   end
+
+  T["spy tests"] = spy_set
 end
 
 return T

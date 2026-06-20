@@ -53,9 +53,19 @@ make clean     # remove deps
 
 Test layers:
 
-- Unit checker: blocklist logic, config override, edge cases.
-- Unit sandbox: sandbox/non-sandbox exec, kill, output interleave, spy.
-- Unit tool: resource cleanup, temp file safety, concurrency, async I/O.
-- Integration: extension register, approval, exec, timeout, bg mode, arg validation.
+- **Unit — checker** (`tests/units/test_checker.lua`): Blocklist logic, config override, edge cases. Pure logic, no I/O.
+- **Unit — sandbox** (`tests/units/test_sandbox.lua`): Sandbox/non-sandbox exec, kill, output interleave, spy on uv.spawn args. Tests `sandbox.lua` in isolation.
+- **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox.run`.
+- **Unit — init** (`tests/units/test_init.lua`): Config merge, registration, default application. Tests `init.setup()` in isolation.
+- **Integration** (`tests/test_integration.lua`): Full `Chat → run_bash → sandbox → command` pipeline. Only the LLM Adapter is mocked. Tests the contract between run_bash and CodeCompanion — tool registration, approval flow, execution, output formatting — all through the Chat interface, not direct handler calls.
+
+**Boundary:** If a test can pass by calling `tool.create()`, `handler()`, or `require_approval_before()` directly, it belongs in a unit test. Integration tests MUST exercise the Chat interface.
 
 Sandbox tests force-run by default. sandlock missing → fail. `SKIP_SANDBOX_TESTS=1 make test` to skip.
+
+### Agent test caveat
+
+When using `run_bash` to run tests: `run_bash` sandbox enabled by default — sandlock can't nest. Two ways:
+
+- `"skip_sandbox": true` — test outside of sandbox (no nesting conflict).
+- `SKIP_SANDBOX_TESTS=1` — skip sandbox tests entirely, test non-sandbox code only.
