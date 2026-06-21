@@ -67,7 +67,7 @@ T["integration: background natural exit reports full output"] = function()
 end
 
 T["integration: safe command auto-approved in sandbox"] = function()
-  -- Intent: Verify a safe command (not in blocklist) in sandbox mode
+  -- Intent: Verify a safe command (not in pause list) in sandbox mode
   -- is auto-approved and produces sandbox active output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
@@ -78,8 +78,8 @@ T["integration: safe command auto-approved in sandbox"] = function()
   })
 end
 
-T["integration: blocklisted command user accepts"] = function()
-  -- Intent: Verify that a blocklisted command in sandbox mode, when accepted
+T["integration: pause-listed command user accepts"] = function()
+  -- Intent: Verify that a pause-listed command in sandbox mode, when accepted
   -- by the user, executes successfully with sandbox active output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
@@ -91,8 +91,8 @@ T["integration: blocklisted command user accepts"] = function()
   })
 end
 
-T["integration: blocklisted command user rejects"] = function()
-  -- Intent: Verify that a blocklisted command in sandbox mode, when rejected
+T["integration: pause-listed command user rejects"] = function()
+  -- Intent: Verify that a pause-listed command in sandbox mode, when rejected
   -- by the user, produces a "User rejected" message in the chat output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
@@ -245,7 +245,7 @@ T["integration: background kill via action=kill"] = function()
   child.stop()
 end
 
-T["integration: blocklisted command always accept cached on second call"] = function()
+T["integration: pause-listed command always accept cached on second call"] = function()
   -- Intent: Verify that "Always accept" caches the approval decision:
   -- the mock approval is called only once across two tool calls.
   Helpers.require_sandbox()

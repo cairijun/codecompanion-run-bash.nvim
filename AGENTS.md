@@ -6,13 +6,13 @@ Coding agent guide for codecompanion-run-bash.nvim.
 
 CodeCompanion extension. Replaces built-in `run_command` tool. Execute bash in chat. Two goals:
 
-1. **Security** — sandlock sandbox (real boundary) + blocklist approval (human checkpoint). Minimize approval friction, keep safety.
+1. **Security** — sandlock sandbox (real boundary) + pause list approval (human checkpoint). Minimize approval friction, keep safety.
 2. **Background processes** — built-in `run_command` hangs on `cmd &` (vim.system waits for pipe close, never returns while process alive). This extension: dedicated background mode. Command detached, returns session_id + partial output. Agent kills later via `{"action": "kill", "session_id": "..."}`.
 
 ## Design Principles
 
-- **Sandbox = real security boundary.** Landlock + seccomp isolate fs + syscalls. Blocklist NOT security — just human checkpoint for risky-but-sandboxable ops.
-- **Minimize approval fatigue.** Frequent approval → user rubber-stamp or disable review → worse than no review. Safe commands = zero friction. Only blocklisted commands pause.
+- **Sandbox = real security boundary.** Landlock + seccomp isolate fs + syscalls. Pause list NOT security — just human checkpoint for risky-but-sandboxable ops.
+- **Minimize approval fatigue.** Frequent approval → user rubber-stamp or disable review → worse than no review. Safe commands = zero friction. Only pause-listed commands pause.
 - **Agent use sandbox by default.** Skip sandbox = rare, needs human approval every time.
 
 ## Architecture
@@ -22,7 +22,7 @@ Major files in `lua/codecompanion/_extensions/run_bash/`:
 | File | Role |
 |------|------|
 | `init.lua` | Entry point. Config merge, tool registration, approval callback wiring, cleanup on VimLeavePre. |
-| `checker.lua` | Blocklist engine. Treesitter parse bash, resolve proxy commands, match against rules. |
+| `checker.lua` | Pause list engine. Treesitter parse bash, resolve proxy commands, match against rules. |
 | `sandbox.lua` | Execution engine. Sandlock or direct bash. uv.spawn, fd lifecycle, process kill. |
 | `tool.lua` | Tool definition. Schema, system prompt, output handlers. Session registry for foreground/background processes. |
 
@@ -32,7 +32,7 @@ Flow: `init.setup()` registers tool → agent calls tool → handler validates a
 
 1. `action=kill` → auto-approve.
 2. Non-sandbox → always require approval.
-3. Sandbox → check blocklist. Parse failure → conservative: require approval.
+3. Sandbox → check pause list. Parse failure → conservative: require approval.
 
 ## Conventions
 
@@ -53,7 +53,7 @@ make clean     # remove deps
 
 Test layers:
 
-- **Unit — checker** (`tests/units/test_checker.lua`): Blocklist logic, config override, edge cases. Pure logic, no I/O.
+- **Unit — checker** (`tests/units/test_checker.lua`): Pause list logic, config override, edge cases. Pure logic, no I/O.
 - **Unit — sandbox** (`tests/units/test_sandbox.lua`): Sandbox/non-sandbox exec, kill, output interleave, spy on uv.spawn args. Tests `sandbox.lua` in isolation.
 - **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox.run`.
 - **Unit — init** (`tests/units/test_init.lua`): Config merge, registration, default application. Tests `init.setup()` in isolation.

@@ -225,7 +225,7 @@ T["init: require_approval_before requires approval for non-sandbox mode"] = func
 end
 
 T["init: require_approval_before auto-approves safe sandbox command"] = function()
-  -- Intent: Verify that a safe command (not in blocklist) in sandbox mode
+  -- Intent: Verify that a safe command (not in pause list) in sandbox mode
   -- is auto-approved. Mock should_use to bypass sandlock availability check.
   local run_bash = require("codecompanion._extensions.run_bash")
   local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
@@ -251,8 +251,8 @@ T["init: require_approval_before auto-approves safe sandbox command"] = function
   MiniTest.expect.equality(false, result)
 end
 
-T["init: require_approval_before requires approval for blocklisted command in sandbox"] = function()
-  -- Intent: Verify that a blocklisted command (rm -rf) in sandbox mode
+T["init: require_approval_before requires approval for pause-listed command in sandbox"] = function()
+  -- Intent: Verify that a pause-listed command (rm -rf) in sandbox mode
   -- requires approval. Mock should_use to bypass sandlock availability check.
   local run_bash = require("codecompanion._extensions.run_bash")
   local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")

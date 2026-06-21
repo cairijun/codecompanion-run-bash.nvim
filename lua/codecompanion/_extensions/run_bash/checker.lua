@@ -1,17 +1,17 @@
 ---@brief
 ---
---- Blocklist checker for run_bash extension.
---- Uses treesitter to parse bash commands and check them against blocklist rules.
+--- Pause list checker for run_bash extension.
+--- Uses treesitter to parse bash commands and check them against pause list rules.
 ---
 --- Interface:
----   checker.new(blocklist_rules) -> checker_instance
+---   checker.new(pauselist_rules) -> checker_instance
 ---   checker_instance:check_require_approval(cmd_string) -> boolean
 ---
 --- Rule value semantics:
 ---   true          → always block
 ---   false         → never block (disable rule)
 ---   function(args) → boolean  → custom check (true = block, false = allow)
----   nil           → not in blocklist (allow)
+---   nil           → not in pause list (allow)
 
 local M = {}
 
@@ -269,7 +269,7 @@ local function blocks_subcmd(set)
   end
 end
 
----Built-in default blocklist rules
+---Built-in default pause list rules
 M.defaults = {
   -- rm: block recursive deletes (-r/-R/--recursive with or without -f)
   rm = function(args)
@@ -391,10 +391,10 @@ M.defaults = {
 }
 
 ---Create a new checker instance
----@param blocklist_rules table<string, boolean|fun(args: string[]): boolean>
+---@param pauselist_rules table<string, boolean|fun(args: string[]): boolean>
 ---@return { check_require_approval: fun(cmd: string|nil): boolean }
-function M.new(blocklist_rules)
-  local rules = blocklist_rules or {}
+function M.new(pauselist_rules)
+  local rules = pauselist_rules or {}
 
   ---Check whether a command requires approval
   ---@param cmd_string string|nil
@@ -421,7 +421,7 @@ function M.new(blocklist_rules)
       return false
     end
 
-    -- Check each command against blocklist
+    -- Check each command against pause list
     for _, entry in ipairs(entries) do
       local rule = rules[entry.name]
       if rule == true then
@@ -433,7 +433,7 @@ function M.new(blocklist_rules)
       end
     end
 
-    -- No blocklist hit
+    -- No pause list hit
     return false
   end
 

@@ -1,6 +1,6 @@
 # run_bash — CodeCompanion Extension
 
-Run Bash commands in CodeCompanion chats with **sandbox isolation** and a **blocklist approval** mechanism.
+Run Bash commands in CodeCompanion chats with **sandbox isolation** and a **pause list approval** mechanism.
 
 ## Why
 
@@ -9,7 +9,7 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
 **Security.** The agent runs many commands. Approving every one causes fatigue — users rubber-stamp or disable review entirely. Two layers solve this:
 
 1. **Sandbox** ([sandlock](https://github.com/multikernel/sandlock)) — the real security boundary. Landlock + seccomp restrict filesystem access and syscalls. Safe commands run with zero friction.
-2. **Blocklist** — not a security measure, but a human checkpoint for destructive ops (`rm -rf`, `git reset --hard`) that can run inside the sandbox but warrant a second look.
+2. **Pause list** — not a security measure, but a human checkpoint for destructive ops (`rm -rf`, `git reset --hard`) that can run inside the sandbox but warrant a second look.
 
 **Background processes.** The built-in `run_command` hangs on backgrounded commands like `./run_server.py &` — `vim.system()` waits for the pipe to close, which never happens while the process is alive. This extension provides a dedicated background mode: the command runs detached, returns an ID with partial output, and the agent can kill it later when its work is done.
 
@@ -22,7 +22,7 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
 │ Landlock+seccomp │                  └────────────┘
 └────────┬─────────┘
          │
-   Blocklisted?
+   Pause-listed?
     ┌────┴────┐
    Yes       No
     │         │
@@ -90,8 +90,8 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
               -- or to disable specific protections:
               -- extra_args = { "--disable", "fs-refer" },
             },
-            -- uncomment to override built-in blocklist:
-            -- blocklist = {
+            -- uncomment to override built-in pause list:
+            -- pauselist = {
             --   cargo = true,                -- true = always block (adds a new rule)
             --   rm = false,                  -- false = disable a built-in rule
             --   git = function(args)         -- function(args) -> boolean = custom check
@@ -163,11 +163,11 @@ The sandlock profile does not expand paths dynamically — `~`, `$PWD`. Use the 
 
 Default rules in [`sandbox.lua`](lua/codecompanion/_extensions/run_bash/sandbox.lua) allow common development paths (`.`, cache/tmp locations, etc.) but deliberately exclude paths that MAY include credentials such as `~/.config/gh`, `~/.npmrc`, and `~/.pip`. Add them to `fs_readable` if you are sure they contain no secrets.
 
-## Default Blocklist
+## Default Pause List
 
 Built-in rules cover destructive commands such as `rm -rf`, `git reset --hard`, and `git push --force`. See [`checker.lua`](lua/codecompanion/_extensions/run_bash/checker.lua) (`M.defaults`) for the full list.
 
-> `git push --force-with-lease` is **not** blocked by default. Override the `git` rule if you need to block it.
+> `git push --force-with-lease` is **not** pause-listed by default. Override the `git` rule if you need to pause-list it.
 
 ## Usage
 Just use `@run_bash` instead of `@run_command` in your CodeCompanion chat.

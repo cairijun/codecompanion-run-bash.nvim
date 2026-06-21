@@ -1,8 +1,8 @@
 --[[
-Test: checker.lua — Blocklist Checker
+Test: checker.lua — Pause List Checker
 
-Intent: Verify that checker.new(blocklist_rules):check_require_approval(cmd)
-correctly identifies dangerous commands per blocklist semantics, handles user
+Intent: Verify that checker.new(pauselist_rules):check_require_approval(cmd)
+correctly identifies dangerous commands per pause list semantics, handles user
 configuration overrides, and behaves safely on edge cases.
 
 ]]
@@ -17,7 +17,7 @@ do
   end
 end
 
--- Default blocklist: positive cases (should return true — needs approval)
+-- Default pause list: positive cases (should return true — needs approval)
 do
   local checker = require("codecompanion._extensions.run_bash.checker")
   local c = checker.new(checker.defaults)
@@ -99,7 +99,7 @@ do
   end
 end
 
--- Default blocklist: negative cases (should return false — auto-approve)
+-- Default pause list: negative cases (should return false — auto-approve)
 do
   local checker = require("codecompanion._extensions.run_bash.checker")
   local c = checker.new(checker.defaults)
@@ -146,7 +146,7 @@ do
   local c = checker.new(checker.defaults)
 
   -- Intent: Verify that commands specified by full path are matched against
-  -- blocklist rules keyed by basename.
+  -- pause list rules keyed by basename.
 
   T["default: /bin/rm -rf blocked"] = function()
     MiniTest.expect.equality(true, c:check_require_approval("/bin/rm -rf /tmp"))
@@ -194,7 +194,7 @@ do
   end
 end
 
--- Blocklist configuration overrides
+-- Pause list configuration overrides
 do
   local checker = require("codecompanion._extensions.run_bash.checker")
 

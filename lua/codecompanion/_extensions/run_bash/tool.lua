@@ -535,7 +535,7 @@ Safety:
 
 Runs bash commands. Sandboxed by default (sandlock: Landlock + seccomp).
 
-Sandbox mode (default): auto-approved unless the command matches a blocklist rule (rm -rf, git reset --hard, etc.). Blocklisted commands require user approval.
+Sandbox mode (default): auto-approved unless the command matches a pause list rule (rm -rf, git reset --hard, etc.). Pause-listed commands require user approval.
 - Sandbox may block file access outside allowed paths or dangerous syscalls.
 - If command fails with permission errors or exit code > 128, retry with `"skip_sandbox": true`.
 

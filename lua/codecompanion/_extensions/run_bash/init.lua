@@ -74,15 +74,15 @@ end
 ---Setup the run_bash extension
 ---@param opts table Configuration options
 ---@param opts.sandbox? table Sandbox configuration: { enabled, profile, rules, extra_args }
----@param opts.blocklist? table Blocklist overrides: { cmd = true|false|fun(args): boolean }
+---@param opts.pauselist? table Pause list overrides: { cmd = true|false|fun(args): boolean }
 function M.setup(opts)
   opts = opts or {}
 
-  -- Merge blocklist: user opts override defaults
-  local merged_blocklist = vim.tbl_deep_extend("force", checker.defaults, opts.blocklist or {})
+  -- Merge pause list: user opts override defaults
+  local merged_pauselist = vim.tbl_deep_extend("force", checker.defaults, opts.pauselist or {})
 
   -- Create checker instance
-  checker_instance = checker.new(merged_blocklist)
+  checker_instance = checker.new(merged_pauselist)
 
   -- Merge sandbox defaults: user opts override defaults
   local sandbox_opts = vim.tbl_deep_extend("force", sandbox.defaults, opts.sandbox or {})
@@ -118,7 +118,7 @@ function M.setup(opts)
           return true
         end
 
-        -- Sandbox mode: check blocklist
+        -- Sandbox mode: check pause list
         return checker_instance:check_require_approval(tool_obj.args.cmd)
       end,
     },

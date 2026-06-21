@@ -128,13 +128,13 @@ end
 
 ---Setup a chat buffer with run_bash tools for integration testing
 ---@param child table MiniTest child neovim instance
----@param opts? table Optional config: { sandbox?: table, blocklist?: table }
+---@param opts? table Optional config: { sandbox?: table, pauselist?: table }
 ---@return string chat_var The variable name where chat is stored ("_G._test_chat")
 function Helpers.setup_chat_with_run_bash(child, opts)
   opts = opts or {}
 
   child.lua([[
-    local sandbox_opts, blocklist_opts = ...
+    local sandbox_opts, pauselist_opts = ...
 ]] .. adapter_code() .. [[
 
     -- Setup CodeCompanion with run_bash extension
@@ -144,7 +144,7 @@ function Helpers.setup_chat_with_run_bash(child, opts)
     config.extensions.run_bash = {
       opts = {
         sandbox = sandbox_opts,
-        blocklist = blocklist_opts,
+        pauselist = pauselist_opts,
       },
     }
     require("codecompanion").setup(config)
@@ -172,7 +172,7 @@ function Helpers.setup_chat_with_run_bash(child, opts)
     end
 
     _G._test_chat = chat
-  ]], { opts.sandbox, opts.blocklist })
+  ]], { opts.sandbox, opts.pauselist })
 
   -- Mock HTTP client
   Helpers.mock_http(child, "_G._test_chat.adapter")
