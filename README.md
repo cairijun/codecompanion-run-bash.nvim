@@ -119,11 +119,11 @@ processes = 4096
 [filesystem]
 read = [
     "/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/proc", "/var",
-    "/dev/zero", "/dev/urandom", "/dev/random", "/dev/tty", "/dev/pts",
+    "/dev/zero", "/dev/urandom", "/dev/random",
 ]
 write = [
     "/tmp", "/var/tmp",
-    "/dev/null",
+    "/dev/null", "/dev/shm", "/dev/ptmx", "/dev/pts", "/dev/tty",
 ]
 deny = ["/root", "/sys", "/proc/sys", "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"]
 
