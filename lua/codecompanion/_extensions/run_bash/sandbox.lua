@@ -17,26 +17,99 @@ local M = {}
 M.defaults = {
   enabled = true,
   rules = {
-    readable = function()
-      return { vim.fn.expand("~") }
-    end,
-    writable = function()
-      return { vim.fn.getcwd(), vim.fn.expand("~/.cache") }
-    end,
+    fs_readable = {
+      "~/.local/bin",
+      "$XDG_DATA_HOME",
+      "~/.gitconfig",
+      "$XDG_CONFIG_HOME/git",
+    },
+    fs_writable = {
+      ".",
+      "$XDG_CACHE_HOME",
+      "$XDG_STATE_HOME",
+      "$XDG_RUNTIME_DIR",
+      "~/.cargo",
+      "~/.rustup",
+      "~/go",
+      "~/.nvm",
+      "~/.fnm",
+      "~/.volta",
+      "~/.asdf",
+      "~/.npm",
+    },
+    fs_denied = {
+      "$XDG_DATA_HOME/kwalletd",
+      "$XDG_DATA_HOME/keyrings",
+      "~/.ssh",
+      "~/.gnupg",
+    },
   },
 }
 
----Expand a dynamic rule to flag + path pairs
----@param rule function|table|nil
----@param flag string
----@return string[]
+-- XDG environment variable fallback paths. Keys are full variable names
+-- with $ prefix (e.g. "$XDG_DATA_HOME") for O(1) hash lookup.
+-- $XDG_RUNTIME_DIR has no fallback — the spec requires it to be set.
+local XDG_FALLBACKS = {
+  ["$XDG_DATA_HOME"] = "~/.local/share",
+  ["$XDG_CONFIG_HOME"] = "~/.config",
+  ["$XDG_CACHE_HOME"] = "~/.cache",
+  ["$XDG_STATE_HOME"] = "~/.local/state",
+}
+
+---Expand a single path: normalize → XDG fallback → (optional) existence check
+---@param path string  Raw path (may contain ~ and $VAR)
+---@param check_existence boolean  Whether to check path existence (false for fs_denied)
+---@return string|nil  Expanded normalized absolute path, nil if unresolvable
+local function resolve_path(path, check_existence)
+  -- Reject non-string types early (fail-fast)
+  if type(path) ~= "string" then
+    error("run_bash: rule path must be a string, got " .. type(path))
+  end
+
+  -- Step 1: vim.fs.normalize handles ~, $VAR, ., .., trailing slash
+  local normalized = vim.fs.normalize(path)
+
+  -- Step 2: if result still starts with $ (env var unset), try XDG fallback
+  if vim.startswith(normalized, "$") then
+    -- Extract first path component (the variable name): from $ to next / or end
+    local slash_pos = normalized:find("/", 2)
+    local var_name = slash_pos and normalized:sub(1, slash_pos - 1) or normalized
+    local fallback = XDG_FALLBACKS[var_name]
+    if fallback then
+      local suffix = normalized:sub(#var_name + 1) -- sub-path after var name (incl. / or empty)
+      normalized = vim.fs.normalize(fallback .. suffix)
+    else
+      return nil -- Not in fallback table, cannot resolve
+    end
+  end
+
+  -- Step 3: existence check (only for fs_readable/fs_writable;
+  -- fs_denied skips this — sandlock --fs-deny allows non-existent paths)
+  if check_existence then
+    if normalized == "" or not uv.fs_stat(normalized) then
+      return nil
+    end
+  end
+
+  return normalized
+end
+
+---Expand a rule table into sandlock CLI flag + path pairs.
+---Non-existent paths silently skipped for -r/-w; --fs-deny always included.
+---@param rule table|nil  List of path strings
+---@param flag string       Sandlock CLI flag ("-r", "-w", "--fs-deny")
+---@return string[]         {flag, path, flag, path, ...}
 local function expand_rule(rule, flag)
   local result = {}
-  local evaluated = type(rule) == "function" and rule() or rule
-  local paths = (type(evaluated) == "table" and evaluated) or {}
+  local paths = (type(rule) == "table" and rule) or {}
+  -- fs_denied does not check existence (sandlock --fs-deny allows non-existent paths)
+  local check_existence = flag ~= "--fs-deny"
   for _, path in ipairs(paths) do
-    table.insert(result, flag)
-    table.insert(result, path)
+    local resolved = resolve_path(path, check_existence)
+    if resolved then
+      table.insert(result, flag)
+      table.insert(result, resolved)
+    end
   end
   return result
 end
@@ -89,8 +162,9 @@ function M.run(sandbox_opts, exec_params)
     executable = "sandlock"
     spawn_args =
       { "run", "--profile-file", sandbox_opts.profile, "--name", sandbox_name, "--port-remap" }
-    vim.list_extend(spawn_args, expand_rule(rules.writable, "-w"))
-    vim.list_extend(spawn_args, expand_rule(rules.readable, "-r"))
+    vim.list_extend(spawn_args, expand_rule(rules.fs_writable, "-w"))
+    vim.list_extend(spawn_args, expand_rule(rules.fs_readable, "-r"))
+    vim.list_extend(spawn_args, expand_rule(rules.fs_denied, "--fs-deny"))
     -- Insert user-configured extra sandlock args before `--`
     if sandbox_opts.extra_args then
       vim.list_extend(spawn_args, sandbox_opts.extra_args)

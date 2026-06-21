@@ -55,20 +55,34 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
       extensions = {
         run_bash = {
           opts = {
-            -- Below is the default configuration (except `profile`).
             sandbox = {
               -- REQUIRED: your sandlock profile path
               profile = vim.fn.stdpath("config") .. "/agent_bash_sandlock.toml",
-              enabled = true, -- sandbox on by default
+              -- Rules appended to the profile at runtime
+              -- Paths are auto-expanded: `~`, `$VAR`,
+              -- and XDG fallbacks (e.g. `$XDG_DATA_HOME` → `~/.local/share`) are resolved
+              -- see [sandbox.lua](lua/codecompanion/_extensions/run_bash/sandbox.lua) for default rules
               rules = {
-                -- extra readable paths passed to sandlock at runtime
-                readable = function()
-                  return { vim.fn.expand("~") }
+                -- Extra paths allowed reading at runtime.
+                -- Table = replaces defaults.
+                fs_readable = {
+                  "~/.local/bin",
+                  "$XDG_DATA_HOME",
+                  "~/.gitconfig",
+                  "$XDG_CONFIG_HOME/git",
+                },
+                -- Extra paths allowed writing at runtime.
+                -- Function = receives defaults, returns new list.
+                fs_writable = function(defaults)
+                  return vim.list_extend({ "/var/log" }, defaults)
                 end,
-                -- extra writable paths passed to sandlock at runtime
-                writable = function()
-                  return { vim.fn.getcwd(), vim.fn.expand("~/.cache") }
-                end,
+                -- Paths explicitly denied
+                fs_denied = {
+                  "$XDG_DATA_HOME/kwalletd",
+                  "$XDG_DATA_HOME/keyrings",
+                  "~/.ssh",
+                  "~/.gnupg",
+                },
               },
               -- extra sandlock CLI args (optional)
               -- useful for older kernels that need degraded protection:
@@ -76,7 +90,7 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
               -- or to disable specific protections:
               -- extra_args = { "--disable", "fs-refer" },
             },
-            -- uncomment to override built-in rules:
+            -- uncomment to override built-in blocklist:
             -- blocklist = {
             --   cargo = true,                -- true = always block (adds a new rule)
             --   rm = false,                  -- false = disable a built-in rule
@@ -92,11 +106,16 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
 }
 ```
 
-## Sandlock Profile
+## Rules
+
+### Sandlock Profile
 
 You need to prepare your own sandlock profile. Below is a strict sample that covers typical development needs:
 
 ```toml
+[limits]
+processes = 4096
+
 [filesystem]
 read = [
     "/usr", "/lib", "/lib64", "/bin", "/etc", "/opt", "/proc", "/var",
@@ -109,10 +128,40 @@ write = [
 deny = ["/root", "/sys", "/proc/sys", "/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"]
 
 [network]
-allow = ["tcp://*:*", "udp://*:53", "icmp://*"]
+allow = [
+    # Localhost — all ports (local dev servers, IPC)
+    "tcp://127.0.0.1", "tcp://::1",
+    "udp://127.0.0.1", "udp://::1",
+
+    # Git hosting
+    "tcp://github.com:443",
+    "tcp://api.github.com:443",
+    "tcp://raw.githubusercontent.com:443",
+    "tcp://objects.githubusercontent.com:443",
+    "tcp://gitlab.com:443",
+
+    # Rust / Cargo
+    "tcp://crates.io:443",
+    "tcp://static.crates.io:443",
+
+    # Node / npm
+    "tcp://registry.npmjs.org:443",
+
+    # Python / pip
+    "tcp://pypi.org:443",
+    "tcp://files.pythonhosted.org:443",
+
+    # Go modules
+    "tcp://proxy.golang.org:443",
+    "tcp://sum.golang.org:443",
+]
 ```
 
-The `rules.writable` and `rules.readable` in your CodeCompanion config are passed to sandlock at runtime, granting additional access on top of the profile.
+### Dynamic Rules
+
+The sandlock profile does not expand paths dynamically — `~`, `$PWD`. Use the `sandbox.rules` option to add paths that depend on the user's environment. See the [Installation](#installation) section for an example.
+
+Default rules in [`sandbox.lua`](lua/codecompanion/_extensions/run_bash/sandbox.lua) allow common development paths (`.`, cache/tmp locations, etc.) but deliberately exclude paths that MAY include credentials such as `~/.config/gh`, `~/.npmrc`, and `~/.pip`. Add them to `fs_readable` if you are sure they contain no secrets.
 
 ## Default Blocklist
 

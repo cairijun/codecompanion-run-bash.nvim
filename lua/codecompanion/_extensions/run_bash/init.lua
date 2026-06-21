@@ -40,6 +40,37 @@ local function get_tools_config()
   return tools
 end
 
+---Resolve fs_* rules: user config replaces defaults; function receives
+---defaults as input and returns the replacement list.
+---Invalid config types throw errors (fail-fast).
+---@param user_rules table|nil
+---@param default_rules table
+---@return table resolved rules
+local function resolve_rules(user_rules, default_rules)
+  local resolved = {}
+  for key, default_val in pairs(default_rules) do
+    local user_val = user_rules and user_rules[key]
+    local val_type = type(user_val)
+    if val_type == "table" then
+      -- Direct replacement
+      resolved[key] = user_val
+    elseif val_type == "function" then
+      -- Function transforms defaults, receives deepcopy to prevent in-place mutation
+      local ok, result = pcall(user_val, vim.deepcopy(default_val))
+      if not ok or type(result) ~= "table" then
+        error("run_bash: rules." .. key .. " function must return a table")
+      end
+      resolved[key] = result
+    elseif val_type == "nil" then
+      -- Use default
+      resolved[key] = default_val
+    else
+      error("run_bash: rules." .. key .. " must be a table or function, got " .. val_type)
+    end
+  end
+  return resolved
+end
+
 ---Setup the run_bash extension
 ---@param opts table Configuration options
 ---@param opts.sandbox? table Sandbox configuration: { enabled, profile, rules, extra_args }
@@ -55,6 +86,8 @@ function M.setup(opts)
 
   -- Merge sandbox defaults: user opts override defaults
   local sandbox_opts = vim.tbl_deep_extend("force", sandbox.defaults, opts.sandbox or {})
+  -- Resolve fs_* rules with replacement semantics: table replaces, function transforms, nil uses default
+  sandbox_opts.rules = resolve_rules(opts.sandbox and opts.sandbox.rules, sandbox.defaults.rules)
 
   -- Register tool in tools_config
   local tools_config = get_tools_config()

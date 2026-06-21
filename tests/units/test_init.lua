@@ -45,7 +45,7 @@ end
 
 T["init: default sandbox config applied when no opts"] = function()
   -- Intent: Verify that when no sandbox options are provided,
-  -- default configuration is applied with enabled=true and default rules.
+  -- default configuration is applied with enabled=true and default fs_* rules.
   local run_bash = require("codecompanion._extensions.run_bash")
   local tools_config = require("codecompanion.config").interactions.chat.tools
 
@@ -57,24 +57,19 @@ T["init: default sandbox config applied when no opts"] = function()
   MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
   MiniTest.expect.equality(true, s_opts.enabled, "sandbox should be enabled by default")
   MiniTest.expect.equality(
-    "function",
-    type(s_opts.rules.readable),
-    "rules.readable should be a function"
+    "table",
+    type(s_opts.rules.fs_readable),
+    "rules.fs_readable should be a table"
   )
   MiniTest.expect.equality(
-    "function",
-    type(s_opts.rules.writable),
-    "rules.writable should be a function"
+    "table",
+    type(s_opts.rules.fs_writable),
+    "rules.fs_writable should be a table"
   )
   MiniTest.expect.equality(
-    true,
-    type(s_opts.rules.readable()) == "table",
-    "readable should return table"
-  )
-  MiniTest.expect.equality(
-    true,
-    type(s_opts.rules.writable()) == "table",
-    "writable should return table"
+    "table",
+    type(s_opts.rules.fs_denied),
+    "rules.fs_denied should be a table"
   )
 end
 
@@ -105,30 +100,26 @@ T["init: enabled=false disables sandbox"] = function()
   MiniTest.expect.equality(false, s_opts.enabled, "enabled should be false when user overrides")
   -- Rules from defaults should still be merged in
   MiniTest.expect.equality(
-    "function",
-    type(s_opts.rules.readable),
-    "default readable rule should be preserved"
+    "table",
+    type(s_opts.rules.fs_readable),
+    "default fs_readable rule should be preserved"
   )
   MiniTest.expect.equality(
-    "function",
-    type(s_opts.rules.writable),
-    "default writable rule should be preserved"
+    "table",
+    type(s_opts.rules.fs_writable),
+    "default fs_writable rule should be preserved"
   )
 end
 
-T["init: partial rules override merges with defaults"] = function()
-  -- Intent: Verify that overriding only rules.writable still preserves
-  -- the default rules.readable from defaults.
+T["init: partial rules override preserves unset defaults"] = function()
+  -- Intent: Verify that overriding only rules.fs_writable still preserves
+  -- the default rules.fs_readable and fs_denied from defaults.
   local run_bash = require("codecompanion._extensions.run_bash")
   local tools_config = require("codecompanion.config").interactions.chat.tools
 
-  local custom_writable = function()
-    return { "/custom/path" }
-  end
-
   tools_config.run_bash = nil
   run_bash.setup({
-    sandbox = { profile = "/some/profile.toml", rules = { writable = custom_writable } },
+    sandbox = { profile = "/some/profile.toml", rules = { fs_writable = { "/custom/path" } } },
   })
 
   local s_opts = tools_config.run_bash.opts.sandbox
@@ -139,14 +130,19 @@ T["init: partial rules override merges with defaults"] = function()
     "user profile should be set"
   )
   MiniTest.expect.equality(
-    "function",
-    type(s_opts.rules.readable),
-    "default readable rule should be preserved"
+    "table",
+    type(s_opts.rules.fs_readable),
+    "default fs_readable rule should be preserved"
   )
   MiniTest.expect.equality(
-    custom_writable,
-    s_opts.rules.writable,
-    "user writable override should be used"
+    "table",
+    type(s_opts.rules.fs_denied),
+    "default fs_denied rule should be preserved"
+  )
+  MiniTest.expect.equality(
+    { "/custom/path" },
+    s_opts.rules.fs_writable,
+    "user fs_writable override should be used"
   )
 end
 
@@ -297,6 +293,187 @@ T["init: require_approval_before requires approval when skip_sandbox=true"] = fu
     opts = { sandbox = { enabled = true } },
   }
   MiniTest.expect.equality(true, fn(tool_obj, {}))
+end
+
+-- ── resolve_rules tests ──────────────────────────────────────────
+
+T["init: resolve_rules table replaces defaults"] = function()
+  -- Intent: Verify that a table rule completely replaces the default,
+  -- and unset keys retain their default values.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = { rules = { fs_readable = { "/custom" } } },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    { "/custom" },
+    s_opts.rules.fs_readable,
+    "fs_readable should be user table"
+  )
+  MiniTest.expect.equality(
+    sandbox_mod.defaults.rules.fs_writable,
+    s_opts.rules.fs_writable,
+    "fs_writable should be default table"
+  )
+  MiniTest.expect.equality(
+    sandbox_mod.defaults.rules.fs_denied,
+    s_opts.rules.fs_denied,
+    "fs_denied should be default table"
+  )
+end
+
+T["init: resolve_rules function transforms defaults"] = function()
+  -- Intent: Verify that a function rule receives the default table and
+  -- can append to it without affecting the original defaults.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = {
+      rules = {
+        fs_writable = function(defaults)
+          local copy = vim.deepcopy(defaults)
+          table.insert(copy, "/extra")
+          return copy
+        end,
+      },
+    },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality("table", type(s_opts.rules.fs_writable), "fs_writable should be a table")
+  MiniTest.expect.equality(true, #s_opts.rules.fs_writable > 0, "fs_writable should have entries")
+  -- Last entry should be /extra
+  MiniTest.expect.equality(
+    "/extra",
+    s_opts.rules.fs_writable[#s_opts.rules.fs_writable],
+    "last entry should be /extra"
+  )
+end
+
+T["init: resolve_rules function receives deepcopy"] = function()
+  -- Intent: Verify that the function receives a deepcopy of defaults,
+  -- preventing in-place mutation of sandbox.defaults.rules.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = {
+      rules = {
+        fs_writable = function(defaults)
+          table.insert(defaults, "/mutated")
+          return defaults
+        end,
+      },
+    },
+  })
+
+  -- The original defaults must NOT contain /mutated
+  MiniTest.expect.equality(
+    false,
+    vim.tbl_contains(sandbox_mod.defaults.rules.fs_writable, "/mutated"),
+    "defaults.fs_writable should NOT contain /mutated"
+  )
+end
+
+T["init: resolve_rules nil uses defaults"] = function()
+  -- Intent: Verify that when no sandbox rules are configured, all three
+  -- fs_* keys come from sandbox.defaults.rules.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local sandbox_mod = require("codecompanion._extensions.run_bash.sandbox")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({})
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    sandbox_mod.defaults.rules.fs_readable,
+    s_opts.rules.fs_readable,
+    "fs_readable should be default"
+  )
+  MiniTest.expect.equality(
+    sandbox_mod.defaults.rules.fs_writable,
+    s_opts.rules.fs_writable,
+    "fs_writable should be default"
+  )
+  MiniTest.expect.equality(
+    sandbox_mod.defaults.rules.fs_denied,
+    s_opts.rules.fs_denied,
+    "fs_denied should be default"
+  )
+end
+
+T["init: resolve_rules invalid type throws error"] = function()
+  -- Intent: Verify that a non-table, non-function rule value raises
+  -- an error message containing "must be a table or function".
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = { rules = { fs_readable = 123 } },
+  })
+
+  MiniTest.expect.equality(false, ok, "should throw error")
+  MiniTest.expect.equality(
+    true,
+    type(err) == "string" and err:find("must be a table or function") ~= nil,
+    "error should mention 'must be a table or function': " .. tostring(err)
+  )
+end
+
+T["init: resolve_rules function returning non-table throws error"] = function()
+  -- Intent: Verify that a function rule returning a non-table raises
+  -- an error message containing "must return a table".
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = {
+      rules = {
+        fs_readable = function()
+          return "string"
+        end,
+      },
+    },
+  })
+
+  MiniTest.expect.equality(false, ok, "should throw error")
+  MiniTest.expect.equality(
+    true,
+    type(err) == "string" and err:find("must return a table") ~= nil,
+    "error should mention 'must return a table': " .. tostring(err)
+  )
+end
+
+T["init: resolve_rules function that throws propagates error"] = function()
+  -- Intent: Verify that a function rule that raises an error propagates
+  -- the error (pcall returns false).
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = {
+      rules = {
+        fs_readable = function()
+          error("boom")
+        end,
+      },
+    },
+  })
+
+  MiniTest.expect.equality(false, ok, "should throw error")
 end
 
 return T

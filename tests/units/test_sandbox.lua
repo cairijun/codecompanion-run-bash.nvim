@@ -192,12 +192,8 @@ do
     enabled = true,
     profile = profile_path,
     rules = {
-      writable = function()
-        return { vim.fn.getcwd() }
-      end,
-      readable = function()
-        return { vim.fn.expand("$HOME") }
-      end,
+      fs_writable = { vim.fn.getcwd() },
+      fs_readable = { vim.fn.expand("$HOME") },
     },
   }
 
@@ -486,12 +482,8 @@ do
       enabled = true,
       profile = profile_path,
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -522,12 +514,8 @@ do
       enabled = true,
       profile = "/tmp/fake-profile.toml",
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -548,8 +536,8 @@ do
     Helpers.expect_contains("--port-remap", args_str)
     Helpers.expect_contains("-w", args_str)
     Helpers.expect_contains("-r", args_str)
-    Helpers.expect_contains("/tmp/writable", args_str)
-    Helpers.expect_contains("/home", args_str)
+    Helpers.expect_contains("/var", args_str)
+    Helpers.expect_contains("/usr", args_str)
   end
 
   spy_set["spy: non-sandbox mode passes bash"] = function()
@@ -578,9 +566,10 @@ do
     MiniTest.expect.equality("echo hi", (captured_args or {})[2])
   end
 
-  spy_set["spy: rules functions are called and expanded"] = function()
-    local w_called = false
-    local r_called = false
+  spy_set["spy: table rules are expanded"] = function()
+    -- Intent: Verify that table rules are expanded into sandlock flag+path pairs.
+    -- Uses real existing paths (/var, /etc, /usr) so that resolve_path
+    -- existence checks pass.
     local captured_args = nil
 
     uv.unref = function() end
@@ -594,14 +583,8 @@ do
       enabled = true,
       profile = "/tmp/fake-profile.toml",
       rules = {
-        writable = function()
-          w_called = true
-          return { "/tmp/a", "/tmp/b" }
-        end,
-        readable = function()
-          r_called = true
-          return { "/home/x" }
-        end,
+        fs_writable = { "/var", "/etc" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -614,18 +597,15 @@ do
       on_exit = function() end,
     })
 
-    MiniTest.expect.equality(true, w_called, "writable function should be called")
-    MiniTest.expect.equality(true, r_called, "readable function should be called")
-
     local args_str = table.concat(captured_args or {}, " ")
-    Helpers.expect_contains("/tmp/a", args_str)
-    Helpers.expect_contains("/tmp/b", args_str)
-    Helpers.expect_contains("/home/x", args_str)
+    Helpers.expect_contains("/var", args_str)
+    Helpers.expect_contains("/etc", args_str)
+    Helpers.expect_contains("/usr", args_str)
   end
 
-  spy_set["spy: nil-returning rule does not crash"] = function()
-    -- Intent: Verify that expand_rule handles a rule function returning nil
-    -- without crashing, instead producing an empty args list (no -w/-r flags).
+  spy_set["spy: nil/missing rule produces empty args"] = function()
+    -- Intent: Verify that an empty rules table produces no -w/-r flags
+    -- in the spawn args.
     local captured_args = nil
 
     uv.unref = function() end
@@ -638,14 +618,7 @@ do
     local test_sb_opts = {
       enabled = true,
       profile = "/tmp/fake-profile.toml",
-      rules = {
-        writable = function()
-          return nil
-        end,
-        readable = function()
-          return nil
-        end,
-      },
+      rules = {},
     }
 
     local ok, err = pcall(sandbox.run, test_sb_opts, {
@@ -798,12 +771,8 @@ do
       profile = "/tmp/fake-profile.toml",
       extra_args = { "--allow-degraded", "signal-scope" },
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -856,12 +825,8 @@ do
       enabled = true,
       profile = "/tmp/fake-profile.toml",
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -896,12 +861,8 @@ do
       profile = "/tmp/fake-profile.toml",
       extra_args = {},
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -936,12 +897,8 @@ do
       profile = "/tmp/fake-profile.toml",
       extra_args = { "--allow-degraded", "fs-refer", "--disable", "signal-scope" },
       rules = {
-        writable = function()
-          return { "/tmp/writable" }
-        end,
-        readable = function()
-          return { "/home" }
-        end,
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
       },
     }
 
@@ -960,6 +917,427 @@ do
     Helpers.expect_contains("fs-refer", args_str)
     Helpers.expect_contains("--disable", args_str)
     Helpers.expect_contains("signal-scope", args_str)
+  end
+
+  spy_set["spy: ~ expansion in fs_denied"] = function()
+    -- Intent: Verify that ~ in fs_denied paths is expanded to the user's
+    -- home directory.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12360
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_denied = { "~/test-deny-path" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-tilde",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--fs-deny", args_str)
+    Helpers.expect_contains(vim.fn.expand("~") .. "/test-deny-path", args_str)
+  end
+
+  spy_set["spy: $HOME expansion in fs_denied"] = function()
+    -- Intent: Verify that $HOME in fs_denied paths is expanded to the
+    -- user's home directory.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12361
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_denied = { "$HOME/test-deny" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-home",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--fs-deny", args_str)
+    Helpers.expect_contains(vim.fn.expand("$HOME") .. "/test-deny", args_str)
+  end
+
+  spy_set["spy: XDG fallback when env var unset"] = function()
+    -- Intent: Verify that when $XDG_DATA_HOME is unset, the path falls
+    -- back to ~/.local/share.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12362
+    end
+
+    local saved = vim.env.XDG_DATA_HOME
+    vim.env.XDG_DATA_HOME = nil
+
+    local ok = pcall(function()
+      local test_sb_opts = {
+        enabled = true,
+        profile = "/tmp/fake-profile.toml",
+        rules = {
+          fs_denied = { "$XDG_DATA_HOME/test" },
+        },
+      }
+
+      sandbox.run(test_sb_opts, {
+        cmd = "echo hi",
+        fd = 3,
+        file_path = "/tmp/test.out",
+        use_sandbox = true,
+        sandbox_name = "cc-test-spy-xdg-fallback",
+        on_exit = function() end,
+      })
+    end)
+
+    vim.env.XDG_DATA_HOME = saved
+
+    MiniTest.expect.equality(true, ok, "should not crash")
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--fs-deny", args_str)
+    -- Path should end with /.local/share/test
+    Helpers.expect_contains("/.local/share/test", args_str)
+  end
+
+  spy_set["spy: XDG env var set"] = function()
+    -- Intent: Verify that when $XDG_DATA_HOME is set to a custom path,
+    -- it is used instead of the fallback.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12363
+    end
+
+    local saved = vim.env.XDG_DATA_HOME
+    vim.env.XDG_DATA_HOME = "/tmp/test-xdg-custom"
+
+    local ok = pcall(function()
+      local test_sb_opts = {
+        enabled = true,
+        profile = "/tmp/fake-profile.toml",
+        rules = {
+          fs_denied = { "$XDG_DATA_HOME/test" },
+        },
+      }
+
+      sandbox.run(test_sb_opts, {
+        cmd = "echo hi",
+        fd = 3,
+        file_path = "/tmp/test.out",
+        use_sandbox = true,
+        sandbox_name = "cc-test-spy-xdg-set",
+        on_exit = function() end,
+      })
+    end)
+
+    vim.env.XDG_DATA_HOME = saved
+
+    MiniTest.expect.equality(true, ok, "should not crash")
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--fs-deny", args_str)
+    Helpers.expect_contains("/tmp/test-xdg-custom/test", args_str)
+  end
+
+  spy_set["spy: fs_denied with non-existent path"] = function()
+    -- Intent: Verify that fs_denied paths are included even if they don't
+    -- exist — sandlock --fs-deny allows non-existent paths.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12364
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_denied = { "/nonexistent-deny-xyz" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-deny-nonexist",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("--fs-deny", args_str)
+    Helpers.expect_contains("/nonexistent-deny-xyz", args_str)
+  end
+
+  spy_set["spy: trailing slash removed"] = function()
+    -- Intent: Verify that trailing slashes on paths are removed by
+    -- vim.fs.normalize.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12365
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_readable = { "/usr/" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-trailing",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("-r /usr", args_str)
+    -- Should NOT contain the trailing slash
+    MiniTest.expect.equality(
+      nil,
+      string.find(args_str, "/usr/ ", 1, true),
+      "should not have trailing slash before space"
+    )
+  end
+
+  spy_set["spy: non-existent path skipped for fs_readable"] = function()
+    -- Intent: Verify that non-existent paths are silently skipped for
+    -- fs_readable (existence check gates -r/-w).
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12366
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_readable = { "/usr", "/nonexistent-xyz-123" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-nonexist",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("-r /usr", args_str)
+    -- Non-existent path should NOT appear
+    MiniTest.expect.equality(
+      nil,
+      string.find(args_str, "nonexistent-xyz-123", 1, true),
+      "non-existent path should be skipped"
+    )
+  end
+
+  spy_set["spy: $XDG_RUNTIME_DIR unset, no fallback"] = function()
+    -- Intent: Verify that $XDG_RUNTIME_DIR has no fallback (spec requires
+    -- it to be set), so the path is skipped when the env var is unset.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12367
+    end
+
+    local saved = vim.env.XDG_RUNTIME_DIR
+    vim.env.XDG_RUNTIME_DIR = nil
+
+    local ok = pcall(function()
+      local test_sb_opts = {
+        enabled = true,
+        profile = "/tmp/fake-profile.toml",
+        rules = {
+          fs_denied = { "$XDG_RUNTIME_DIR/test" },
+        },
+      }
+
+      sandbox.run(test_sb_opts, {
+        cmd = "echo hi",
+        fd = 3,
+        file_path = "/tmp/test.out",
+        use_sandbox = true,
+        sandbox_name = "cc-test-spy-xdg-runtime",
+        on_exit = function() end,
+      })
+    end)
+
+    vim.env.XDG_RUNTIME_DIR = saved
+
+    MiniTest.expect.equality(true, ok, "should not crash")
+    local args_str = table.concat(captured_args or {}, " ")
+    -- Should NOT contain --fs-deny for this path
+    MiniTest.expect.equality(
+      nil,
+      string.find(args_str, "XDG_RUNTIME_DIR", 1, true),
+      "XDG_RUNTIME_DIR should not appear in args"
+    )
+  end
+
+  spy_set["spy: unknown env var, no fallback"] = function()
+    -- Intent: Verify that unknown environment variables (not in
+    -- XDG_FALLBACKS) result in the path being skipped.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12368
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_denied = { "$UNKNOWN_VAR_123/test" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-unknown-var",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    MiniTest.expect.equality(
+      nil,
+      string.find(args_str, "UNKNOWN_VAR_123", 1, true),
+      "unknown env var should be skipped"
+    )
+  end
+
+  spy_set["spy: all paths fail -> empty args"] = function()
+    -- Intent: Verify that when all paths in a rule fail to resolve,
+    -- no corresponding flags are emitted.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12369
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_readable = { "/nonexistent1", "/nonexistent2" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-all-fail",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    -- No -r flag should be present (expand_rule returned empty list)
+    MiniTest.expect.equality(nil, string.find(args_str, " -r ", 1, true), "should not have -r flag")
+  end
+
+  spy_set["spy: fs_denied, fs_writable, fs_readable all present"] = function()
+    -- Intent: Verify that all three rules emit their corresponding flags
+    -- in the correct order: -w, -r, --fs-deny.
+    local captured_args = nil
+
+    uv.unref = function() end
+    uv.spawn = function(exe, opts, on_exit)
+      captured_args = opts.args
+      return {}, 12370
+    end
+
+    local test_sb_opts = {
+      enabled = true,
+      profile = "/tmp/fake-profile.toml",
+      rules = {
+        fs_writable = { "/var" },
+        fs_readable = { "/usr" },
+        fs_denied = { "/nonexistent-deny" },
+      },
+    }
+
+    sandbox.run(test_sb_opts, {
+      cmd = "echo hi",
+      fd = 3,
+      file_path = "/tmp/test.out",
+      use_sandbox = true,
+      sandbox_name = "cc-test-spy-all-three",
+      on_exit = function() end,
+    })
+
+    local args_str = table.concat(captured_args or {}, " ")
+    Helpers.expect_contains("-w", args_str)
+    Helpers.expect_contains("-r", args_str)
+    Helpers.expect_contains("--fs-deny", args_str)
+    -- Verify order: -w before -r before --fs-deny
+    local w_pos = string.find(args_str, "-w ", 1, true)
+    local r_pos = string.find(args_str, "-r ", 1, true)
+    local deny_pos = string.find(args_str, "--fs-deny", 1, true)
+    MiniTest.expect.equality(true, w_pos ~= nil, "-w should be present")
+    MiniTest.expect.equality(true, r_pos ~= nil, "-r should be present")
+    MiniTest.expect.equality(true, deny_pos ~= nil, "--fs-deny should be present")
+    if w_pos and r_pos then
+      MiniTest.expect.equality(true, w_pos < r_pos, "-w should come before -r")
+    end
+    if r_pos and deny_pos then
+      MiniTest.expect.equality(true, r_pos < deny_pos, "-r should come before --fs-deny")
+    end
   end
 
   T["spy tests"] = spy_set
