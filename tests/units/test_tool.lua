@@ -806,7 +806,6 @@ T["tool: create returns valid tool definition"] = function()
   MiniTest.expect.equality(true, def.schema ~= nil)
   MiniTest.expect.equality(true, #def.cmds == 1)
   MiniTest.expect.equality(true, def.output ~= nil)
-  MiniTest.expect.equality(true, def.system_prompt ~= nil)
 
   -- Schema has expected fields; skip_sandbox presence depends on sandlock (tested in next test)
   local props = def.schema["function"].parameters.properties

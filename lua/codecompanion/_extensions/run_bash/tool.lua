@@ -1,7 +1,7 @@
 ---@brief
 ---
 --- Tool definition for run_bash CodeCompanion extension.
---- Generates schema, system_prompt, cmds handler, and output handlers.
+--- Generates schema, cmds handler, and output handlers.
 --- Delegates execution to sandbox.lua and uses checker.lua for approval.
 
 local uv = vim.uv
@@ -463,6 +463,44 @@ local M = {}
 function M.create(sandbox_opts)
   local sandbox_available = sandbox.is_available(sandbox_opts)
 
+  -- ── Dynamic tool description ─────────────────────────────────────────
+  local tool_desc
+  if sandbox_available then
+    tool_desc = [[Runs bash commands. Sandboxed by default (sandlock: Landlock + seccomp).
+
+Sandbox mode (default): auto-approved unless the command matches a pause list rule (git reset --hard, npm publish, etc.). Pause-listed commands require user approval.
+- Sandbox may block access outside allowed file paths / network targets or dangerous syscalls.
+- If command fails with permission errors or exit code > 128, retry with `"skip_sandbox": true`.
+
+Non-sandbox (`"skip_sandbox": true`): always requires user approval. Only when sandbox blocks legitimate work. Prefer identical `cmd` used before to reduce approval requests (unless rejected before).
+]]
+  else
+    tool_desc =
+      [[Runs bash commands. Requires user approval for all commands. Prefer identical `cmd` used before to reduce approval requests (unless rejected before).
+]]
+  end
+  tool_desc = tool_desc
+    .. [[
+Output: merged stdout+stderr (interleaved by time). Exit code reported on failure.
+
+ANSI color codes auto-stripped from output.
+
+Timeout: default 300s. Set `"timeout"` (max 3600s) for long commands. Foreground only.
+
+Background mode (`"bg_after"` > 0): runs command detached. Substitute `&`. Tool waits `bg_after` seconds (max 60) for startup output, then returns partial output + `session_id` + output file path. Read the file later for ongoing output. Kill with `{"action": "kill", "session_id": "..."}`.
+
+MUST rules:
+- Use `bg_after > 0` to run in background; **NEVER USE `&` FOR BACKGROUND**; `&`-ed processes won't work correctly in sandbox
+- STOP and ask for help on authentication errors, NO poking around for credentials or tokens
+- MUST kill background sessions after work done
+
+Safety:
+- Do NOT run destructive commands: rm -rf, format disks, modify system configs.
+- Do NOT install software (pip install, npm install -g, apt-get).
+- Do NOT download from untrusted URLs.
+- Do NOT print/send sensitive info (passwords, tokens, user history, personally identifiable info, etc.). 
+- Prefer read-only operations. Write only within the project workspace.]]
+
   -- ── Dynamic schema ────────────────────────────────────────────────
 
   local props = {
@@ -499,9 +537,7 @@ function M.create(sandbox_opts)
     type = "function",
     ["function"] = {
       name = "run_bash",
-      description = sandbox_available
-          and "Execute a Bash command. Sandboxed by default (sandlock). Supports foreground and background execution."
-        or "Execute a Bash command.",
+      description = tool_desc,
       parameters = {
         type = "object",
         properties = props,
@@ -510,45 +546,6 @@ function M.create(sandbox_opts)
       },
     },
   }
-
-  -- ── Dynamic system_prompt ─────────────────────────────────────────
-
-  local shared_prompt_body =
-    [[Output: merged stdout+stderr (interleaved by time). Exit code reported on failure.
-
-ANSI color codes auto-stripped from output.
-
-Timeout: default 300s. Set `"timeout"` (max 3600s) for long commands. Foreground only.
-
-Background mode (`"bg_after"` > 0): runs command detached. Tool waits `bg_after` seconds (max 60) for startup output, then returns partial output + `session_id` + output file path. Read the file later for ongoing output. Kill with `{"action": "kill", "session_id": "..."}`.
-
-Safety:
-- Do NOT run destructive commands: rm -rf, format disks, modify system configs.
-- Do NOT install software (pip install, npm install -g, apt-get).
-- Do NOT download from untrusted URLs.
-- Prefer read-only operations. Write only within the project workspace.
-]]
-
-  local system_prompt
-  if sandbox_available then
-    system_prompt = [[# run_bash — Execute Bash commands
-
-Runs bash commands. Sandboxed by default (sandlock: Landlock + seccomp).
-
-Sandbox mode (default): auto-approved unless the command matches a pause list rule (rm -rf, git reset --hard, etc.). Pause-listed commands require user approval.
-- Sandbox may block file access outside allowed paths or dangerous syscalls.
-- If command fails with permission errors or exit code > 128, retry with `"skip_sandbox": true`.
-
-Non-sandbox (`"skip_sandbox": true`): always requires user approval. Only when sandbox blocks legitimate work.
-
-]] .. shared_prompt_body
-  else
-    system_prompt = [[# run_bash — Execute Bash commands
-
-Runs bash commands. Requires user approval for all commands.
-
-]] .. shared_prompt_body
-  end
 
   -- ── cmds handler ──────────────────────────────────────────────────
 
@@ -602,7 +599,10 @@ Runs bash commands. Requires user approval for all commands.
         return ("Kill background session %s?"):format(self.args.session_id or "?")
       end
       local cmd = self.args.cmd
-      return ("Run the following Bash command?\n````bash\n%s\n````"):format(cmd)
+      return ("Run the following Bash command (%s sandbox)?\n````bash\n%s\n````"):format(
+        self.args.skip_sandbox and "WITHOUT" or "IN",
+        cmd
+      )
     end,
 
     success = function(self, data, meta)
@@ -717,7 +717,6 @@ Sandbox: %s
     description = "Execute a Bash command. Sandboxed by default (sandlock).",
     cmds = { handler },
     schema = schema,
-    system_prompt = system_prompt,
     output = output,
   }
 end
