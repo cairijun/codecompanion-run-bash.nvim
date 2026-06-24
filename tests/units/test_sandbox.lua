@@ -107,19 +107,23 @@ do
     MiniTest.expect.equality(1, exit_code or -1)
   end
 
-  T["non-sandbox: kill running process"] = function()
-    local file_path = "/tmp/cc-test-kill-" .. math.random(10000, 99999) .. ".out"
+  T["non-sandbox: kill sends SIGTERM before SIGKILL and fires callback"] = function()
+    -- Intent: Verify non-sandbox kill uses two-stage SIGTERM → delayed SIGKILL.
+    -- The trap handler proves SIGTERM arrived before SIGKILL;
+    -- SIGKILL alone would kill the process without the trap firing.
+    local file_path = "/tmp/cc-test-kill-seq-" .. math.random(10000, 99999) .. ".out"
     local fd = uv.fs_open(file_path, "w", 420)
     MiniTest.expect.equality(true, fd ~= nil)
 
     local done = false
+    local callback_fired = false
 
     local handle, pid = sandbox.run(nil, {
-      cmd = "sleep 30",
+      cmd = "trap 'echo SIGTERM_RECEIVED' TERM; sleep 30",
       fd = fd,
       file_path = file_path,
       use_sandbox = false,
-      on_exit = function(code)
+      on_exit = function()
         done = true
       end,
     })
@@ -128,22 +132,30 @@ do
       uv.unref(handle)
     end
 
-    -- Give process time to start
-    vim.wait(200, function()
+    -- Give trap time to be set in the child process
+    vim.wait(300, function()
       return false
     end)
 
-    -- Kill the process group
-    sandbox.kill(nil, pid)
+    sandbox.kill(nil, pid, function()
+      callback_fired = true
+    end)
 
-    -- Wait for on_exit to fire
-    local ok = vim.wait(3000, function()
-      return done
+    -- Wait for both process exit and kill callback (SIGTERM + 2s delay + SIGKILL)
+    local ok = vim.wait(5000, function()
+      return done and callback_fired
     end, 50)
     pcall(uv.fs_close, fd)
+    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
     pcall(os.remove, file_path)
 
-    MiniTest.expect.equality(true, ok, "on_exit should fire after kill")
+    MiniTest.expect.equality(true, ok, "process should die and callback should fire")
+    Helpers.expect_contains("SIGTERM_RECEIVED", content)
+  end
+
+  T["non-sandbox: kill without callback does not error"] = function()
+    local ok, err = pcall(sandbox.kill, nil, 99999)
+    MiniTest.expect.equality(true, ok, "kill without callback should not error: " .. tostring(err))
   end
 
   T["non-sandbox: output interleaving"] = function()

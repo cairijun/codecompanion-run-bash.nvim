@@ -327,7 +327,13 @@ T["tool: on_exit does not use blocking io.open"] = function()
     captured_on_exit = exec_params.on_exit
     return { close = function() end }, 12345, false
   end
-  sandbox_mod.kill = function() end
+  sandbox_mod.kill = function(_, _, on_killed)
+    -- sandbox and non-sandbox kill both fire on_killed callback;
+    -- mock must trigger it so handle_kill reports completion.
+    if on_killed then
+      on_killed()
+    end
+  end
   uv.fs_open = function()
     return 999
   end
@@ -440,7 +446,11 @@ T["tool: foreground output strips ANSI color codes"] = function()
     captured_on_exit = exec_params.on_exit
     return { close = function() end }, 12345, false
   end
-  sandbox_mod.kill = function() end
+  sandbox_mod.kill = function(_, _, on_killed)
+    if on_killed then
+      on_killed()
+    end
+  end
 
   local def = tool_mod.create({ enabled = false })
   local handler = def.cmds[1]
@@ -521,7 +531,11 @@ T["tool: background bg_exited output strips ANSI color codes"] = function()
   sandbox_mod.is_available = function()
     return true
   end
-  sandbox_mod.kill = function() end
+  sandbox_mod.kill = function(_, _, on_killed)
+    if on_killed then
+      on_killed()
+    end
+  end
 
   local def = tool_mod.create({ enabled = false })
   local handler = def.cmds[1]
@@ -657,7 +671,11 @@ T["tool: background output file is preserved after natural exit"] = function()
     sandbox_mod.is_available = function()
       return true
     end
-    sandbox_mod.kill = function() end
+    sandbox_mod.kill = function(_, _, on_killed)
+    if on_killed then
+      on_killed()
+    end
+  end
 
     local def = tool_mod.create({ enabled = false })
     local handler = def.cmds[1]
@@ -746,7 +764,11 @@ T["tool: background output file is preserved on kill"] = function()
   sandbox_mod.is_available = function()
     return true
   end
-  sandbox_mod.kill = function() end
+  sandbox_mod.kill = function(_, _, on_killed)
+    if on_killed then
+      on_killed()
+    end
+  end
 
   local def = tool_mod.create({ enabled = false })
   local handler = def.cmds[1]
@@ -883,6 +905,95 @@ T["tool: background output file is preserved on spawn failure"] = function()
       "os.remove should not delete the output file on spawn failure"
     )
   end
+end
+
+T["tool: handle_kill reports only after kill callback"] = function()
+  -- Intent: Verify handle_kill passes a callback to sandbox.kill and
+  -- does NOT report success via output_cb until the callback fires.
+  -- sandbox.kill handles both sandbox/non-sandbox internally; this test
+  -- verifies the tool layer defers reporting to the callback regardless.
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+
+  local captured = setup_common_mocks("output")
+
+  -- Override timer mock to capture all callbacks (bg_after timer needs firing)
+  local timers = {}
+  uv.new_timer = function()
+    return {
+      start = function(_, _, _, cb)
+        table.insert(timers, cb)
+      end,
+      stop = function() end,
+      close = function() end,
+      is_closing = function()
+        return true
+      end,
+    }
+  end
+
+  sandbox_mod.run = function()
+    return { close = function() end }, 12345, false
+  end
+  sandbox_mod.is_available = function()
+    return false
+  end
+
+  -- Mock sandbox.kill to capture the callback
+  local captured_kill_cb = nil
+  sandbox_mod.kill = function(_, _, on_killed)
+    captured_kill_cb = on_killed
+  end
+
+  local def = tool_mod.create({ enabled = false })
+  local handler = def.cmds[1]
+  local tools = { tool = { opts = { sandbox = { enabled = false } } } }
+
+  -- Start a background command
+  local bg_output
+  handler(tools, { cmd = "echo test", bg_after = 1 }, {
+    output_cb = function(data)
+      bg_output = data
+    end,
+  })
+
+  -- Fire the bg_after timer so we get a session_id
+  MiniTest.expect.equality(1, #timers, "should have created 1 timer")
+  timers[1]()
+
+  MiniTest.expect.equality(true, bg_output ~= nil, "should have bg output after timer")
+  local session_id = bg_output.data.session_id
+  MiniTest.expect.equality(true, session_id ~= nil, "should have session_id")
+
+  -- Kill the session
+  local kill_output
+  local kill_output_called = false
+  handler(tools, { action = "kill", session_id = session_id }, {
+    output_cb = function(data)
+      kill_output = data
+      kill_output_called = true
+    end,
+  })
+
+  -- Assert: sandbox.kill received a callback
+  MiniTest.expect.equality("function", type(captured_kill_cb), "should pass a callback")
+
+  -- Assert: output_cb NOT called yet (callback not fired)
+  MiniTest.expect.equality(false, kill_output_called, "should NOT report before callback")
+
+  -- Fire the kill callback
+  captured_kill_cb()
+
+  -- Assert: now output_cb is called (vim.schedule is mocked sync by setup_common_mocks)
+  MiniTest.expect.equality(true, kill_output_called, "should report after callback")
+  MiniTest.expect.equality("success", kill_output.status)
+  MiniTest.expect.equality("killed", kill_output.data.kill_info)
+
+  -- Restore sandbox module functions that were mocked in this test.
+  -- The test set's post hook may not run due to timer mock interference;
+  -- explicit restoration prevents state from leaking to subsequent tests.
+  sandbox_mod.run = orig_sandbox_run
+  sandbox_mod.kill = orig_sandbox_kill
+  sandbox_mod.is_available = orig_sandbox_is_available
 end
 
 -- ── Migrated handler arg validation tests ──────────────────────

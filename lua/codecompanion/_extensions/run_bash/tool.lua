@@ -247,18 +247,25 @@ local function handle_kill(session_id, opts)
   -- Session is running: kill the entire process group.
   -- Do not delete the output file on kill; the user/agent may still read the
   -- final output after termination.
-  sandbox.kill(session.sandbox_name, session.pid)
+  -- sandbox.kill handles both sandbox and non-sandbox paths internally;
+  -- tool layer delegates via callback regardless of sandbox mode.
+  local pid = session.pid
+  local file_path = session.file_path
   session.status = STATUS_KILLED
   registry:remove_bg(session_id)
-  opts.output_cb({
-    status = "success",
-    data = {
-      kill_info = "killed",
-      session_id = session_id,
-      pid = session.pid,
-      file_path = session.file_path,
-    },
-  })
+  sandbox.kill(session.sandbox_name, pid, function()
+    vim.schedule(function()
+      opts.output_cb({
+        status = "success",
+        data = {
+          kill_info = "killed",
+          session_id = session_id,
+          pid = pid,
+          file_path = file_path,
+        },
+      })
+    end)
+  end)
 end
 
 ---Spawn a command in background mode.

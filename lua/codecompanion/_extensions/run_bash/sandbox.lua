@@ -193,7 +193,10 @@ end
 ---Kill a process group
 ---@param sandbox_name string|nil Non-nil → sandlock kill; nil → uv.kill(-pid)
 ---@param pid integer
-function M.kill(sandbox_name, pid)
+---@param on_killed function|nil Callback after kill sequence completes.
+---  Sandbox: fires when sandlock spawn exits.
+---  Non-sandbox: fires after SIGTERM grace period + SIGKILL.
+function M.kill(sandbox_name, pid, on_killed)
   if sandbox_name then
     -- Use uv.spawn with args array to prevent shell injection
     -- and avoid blocking the event loop with os.execute
@@ -206,13 +209,29 @@ function M.kill(sandbox_name, pid)
       if handle then
         uv.close(handle)
       end
+      if on_killed then
+        on_killed()
+      end
     end)
     if handle then
       -- Unref so fire-and-forget kill doesn't keep the event loop alive
       uv.unref(handle)
     end
   else
-    pcall(uv.kill, -pid, "sigkill")
+    -- Non-sandbox: two-stage SIGTERM → SIGKILL.
+    -- SIGTERM allows processes (e.g., docker CLI) to forward the signal to
+    -- children and clean up before receiving the final SIGKILL.
+    pcall(uv.kill, -pid, "sigterm")
+    local kill_timer = uv.new_timer()
+    kill_timer:start(2000, 0, function()
+      kill_timer:close()
+      pcall(uv.kill, -pid, "sigkill")
+      if on_killed then
+        on_killed()
+      end
+    end)
+    -- Unref so fire-and-forget kill doesn't keep the event loop alive
+    uv.unref(kill_timer)
   end
 end
 

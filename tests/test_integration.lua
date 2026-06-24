@@ -235,10 +235,10 @@ T["integration: background kill via action=kill"] = function()
     child.lua(
       [[ local chat = _G._test_chat; chat:add_buf_message({ role = "user", content = "Kill the background session" }); chat:submit() ]]
     )
-    MiniTest.expect.equality(true, child.lua([[local chat = _G._test_chat; local n = 0
-        for _, m in ipairs(chat.messages) do
-          if m.role == 'tool' and m.content and m.content ~= '' then n = n + 1 end
-        end; return n]]) > before_count, "Kill should produce a new tool message")
+    -- Kill is now asynchronous (callback-based for both sandbox and non-sandbox).
+    -- Wait for the delayed tool message to appear.
+    local ok2 = Helpers.wait_for_new_tool_output(child, nil, 5000)
+    MiniTest.expect.equality(true, ok2, "Kill tool output should appear within timeout")
     local content2 = Helpers.get_latest_tool_output_content(child)
     Helpers.expect_contains("Killed", content2)
   end
