@@ -104,7 +104,6 @@ function SessionRegistry:cleanup_all()
       pcall(uv.fs_close, session.fd)
     end
     close_timer(session.timer)
-    pcall(os.remove, session.file_path)
   end
   for pid, info in pairs(self.fg_procs) do
     sandbox.kill(info.sandbox_name, pid)
@@ -155,10 +154,11 @@ local function make_on_exit_handler(params)
       if session then
         session.status = STATUS_EXITED
         session.exit_code = code
-        -- If timer already fired (process exited after timer callback),
-        -- clean up now since timer callback won't run again
+        -- Background output files are intentionally not removed. A background
+        -- command may exit or be killed at any time; keeping the file lets the
+        -- bg_after timer or the user/agent read the final output afterward.
+        -- Neovim's temp directory cleanup handles removal on exit.
         if session.timer_fired then
-          pcall(os.remove, session.file_path)
           registry:remove_bg(params.session_id)
         end
       end
@@ -239,14 +239,16 @@ local function handle_kill(session_id, opts)
         kill_info = "already exited",
         exit_code = session.exit_code,
         session_id = session_id,
+        file_path = session.file_path,
       },
     })
     return
   end
-  -- Session is running: kill the entire process group
+  -- Session is running: kill the entire process group.
+  -- Do not delete the output file on kill; the user/agent may still read the
+  -- final output after termination.
   sandbox.kill(session.sandbox_name, session.pid)
   session.status = STATUS_KILLED
-  pcall(os.remove, session.file_path)
   registry:remove_bg(session_id)
   opts.output_cb({
     status = "success",
@@ -254,6 +256,7 @@ local function handle_kill(session_id, opts)
       kill_info = "killed",
       session_id = session_id,
       pid = session.pid,
+      file_path = session.file_path,
     },
   })
 end
@@ -302,7 +305,6 @@ local function spawn_background(sandbox_opts, args, tools, opts)
 
   if not handle then
     pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
     opts.output_cb({
       status = "error",
       data = { output = "spawn failed: " .. tostring(pid_or_err) },
@@ -338,8 +340,7 @@ local function spawn_background(sandbox_opts, args, tools, opts)
       local fp = session.file_path
       read_file_async(fp, function(_, content)
         content = strip_ansi(content or "")
-        -- Clean up session resources
-        pcall(os.remove, fp)
+        -- Clean up session registry entry; the output file is preserved.
         registry:remove_bg(session_id)
         vim.schedule(function()
           opts.output_cb({
@@ -612,12 +613,22 @@ Safety:
         if d.kill_info == "already exited" then
           return meta.tools.chat:add_tool_output(
             self,
-            fmt("Session %s already exited (code: %s).", d.session_id or "?", d.exit_code or "?")
+            fmt(
+              "Session %s already exited (code: %s).\nOutput file preserved at: %s",
+              d.session_id or "?",
+              d.exit_code or "?",
+              d.file_path or "?"
+            )
           )
         end
         return meta.tools.chat:add_tool_output(
           self,
-          fmt("Killed background session %s (PID %d).", d.session_id, d.pid)
+          fmt(
+            "Killed background session %s (PID %d).\nOutput file preserved at: %s",
+            d.session_id,
+            d.pid,
+            d.file_path or "?"
+          )
         )
       end
 

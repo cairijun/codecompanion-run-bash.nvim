@@ -556,7 +556,7 @@ end
 T["tool: background session cleaned up after natural exit"] = function()
   -- Intent: Verify that after a background process exits naturally,
   -- the bg_exited timer branch removes the session from the registry,
-  -- deletes the temp output file, and a subsequent kill returns
+  -- does NOT delete the temp output file, and a subsequent kill returns
   -- "session not found."
   local tool_mod = require("codecompanion._extensions.run_bash.tool")
 
@@ -606,9 +606,9 @@ T["tool: background session cleaned up after natural exit"] = function()
     captured.timer_cb()
   end
   MiniTest.expect.equality(
-    1,
+    0,
     remove_call_count,
-    "os.remove should be called once by bg_exited cleanup"
+    "os.remove should still NOT be called after bg_exited cleanup"
   )
 
   MiniTest.expect.equality(true, output_data ~= nil, "should have bg_exited output")
@@ -630,6 +630,258 @@ T["tool: background session cleaned up after natural exit"] = function()
   if kill_output then
     local error_msg = kill_output.data and kill_output.data.error or ""
     Helpers.expect_contains("session not found", error_msg)
+  end
+end
+
+-- ── Background output file preservation ─────────────────────
+
+T["tool: background output file is preserved after natural exit"] = function()
+  -- Intent: Verify that the background output file is never deleted when a
+  -- background process exits, whether the exit happens before or after the
+  -- bg_after timer fires.
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+
+  local function run_scenario(name, seq_fn)
+    local captured = setup_common_mocks("done")
+    local removed_paths = {}
+    os.remove = function(path)
+      table.insert(removed_paths, path)
+      return true
+    end
+
+    local captured_on_exit
+    sandbox_mod.run = function(sandbox_opts, exec_params)
+      captured_on_exit = exec_params.on_exit
+      return { close = function() end }, 12345, true
+    end
+    sandbox_mod.is_available = function()
+      return true
+    end
+    sandbox_mod.kill = function() end
+
+    local def = tool_mod.create({ enabled = false })
+    local handler = def.cmds[1]
+    local tools = { tool = { opts = { sandbox = { enabled = true } } } }
+
+    local output_data
+    handler(tools, { cmd = "echo test", bg_after = 1 }, {
+      output_cb = function(data)
+        output_data = data
+      end,
+    })
+
+    MiniTest.expect.equality(true, captured_on_exit ~= nil, name .. ": on_exit should be captured")
+    MiniTest.expect.equality(true, captured.timer_cb ~= nil, name .. ": timer should be captured")
+
+    seq_fn(captured_on_exit, captured.timer_cb)
+
+    MiniTest.expect.equality(true, output_data ~= nil, name .. ": should have output")
+    local file_path = output_data and output_data.data and output_data.data.file_path
+    local session_id = output_data and output_data.data and output_data.data.session_id
+    MiniTest.expect.equality(true, file_path ~= nil, name .. ": should have file_path")
+
+    for _, removed_path in ipairs(removed_paths) do
+      MiniTest.expect.equality(
+        false,
+        removed_path == file_path,
+        name .. ": os.remove should not delete the background output file"
+      )
+    end
+
+    -- After both callbacks, the session should be gone
+    local kill_output
+    handler(tools, { action = "kill", session_id = session_id }, {
+      output_cb = function(data)
+        kill_output = data
+      end,
+    })
+    MiniTest.expect.equality(true, kill_output ~= nil, name .. ": should have kill response")
+    if kill_output then
+      local error_msg = kill_output.data and kill_output.data.error or ""
+      Helpers.expect_contains("session not found", error_msg)
+    end
+  end
+
+  run_scenario("exit before timer", function(on_exit, timer_cb)
+    on_exit(0, 0)
+    timer_cb()
+  end)
+
+  run_scenario("timer before exit", function(on_exit, timer_cb)
+    timer_cb()
+    on_exit(0, 0)
+  end)
+
+  run_scenario("non-zero early exit", function(on_exit, timer_cb)
+    on_exit(1, 0)
+    timer_cb()
+  end)
+end
+
+T["tool: background output file is preserved on kill"] = function()
+  -- Intent: Verify that action=kill terminates the background session but
+  -- keeps the output file, returning the preserved path in the response.
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+
+  local captured = setup_common_mocks("partial output")
+
+  local removed_paths = {}
+  os.remove = function(path)
+    table.insert(removed_paths, path)
+    return true
+  end
+
+  local captured_on_exit
+  local captured_session_id
+  local captured_file_path
+  sandbox_mod.run = function(sandbox_opts, exec_params)
+    captured_on_exit = exec_params.on_exit
+    captured_file_path = exec_params.file_path
+    local name = exec_params.sandbox_name
+    if name then
+      captured_session_id = name:match("^cc%-bash%-(.+)$")
+    end
+    return { close = function() end }, 12345, true
+  end
+  sandbox_mod.is_available = function()
+    return true
+  end
+  sandbox_mod.kill = function() end
+
+  local def = tool_mod.create({ enabled = false })
+  local handler = def.cmds[1]
+  local tools = { tool = { opts = { sandbox = { enabled = true } } } }
+
+  -- Scenario: kill a running session
+  handler(tools, { cmd = "echo test", bg_after = 1 }, {
+    output_cb = function() end,
+  })
+  MiniTest.expect.equality(
+    true,
+    captured_session_id ~= nil,
+    "running session should have session_id"
+  )
+  MiniTest.expect.equality(true, captured_file_path ~= nil, "running session should have file_path")
+
+  local kill_output
+  handler(tools, { action = "kill", session_id = captured_session_id }, {
+    output_cb = function(data)
+      kill_output = data
+    end,
+  })
+  MiniTest.expect.equality("success", kill_output.status)
+  MiniTest.expect.equality("killed", kill_output.data.kill_info)
+  MiniTest.expect.equality(
+    captured_file_path,
+    kill_output.data.file_path,
+    "kill should return preserved file_path"
+  )
+
+  for _, removed_path in ipairs(removed_paths) do
+    MiniTest.expect.equality(
+      false,
+      removed_path == captured_file_path,
+      "os.remove should not delete the running session's output file"
+    )
+  end
+
+  -- Scenario: kill an already-exited session
+  captured_session_id = nil
+  captured_file_path = nil
+  handler(tools, { cmd = "echo test", bg_after = 1 }, {
+    output_cb = function() end,
+  })
+  MiniTest.expect.equality(
+    true,
+    captured_session_id ~= nil,
+    "exited session should have session_id"
+  )
+  MiniTest.expect.equality(true, captured_file_path ~= nil, "exited session should have file_path")
+
+  -- Process exits before the timer fires, leaving the session in EXITED state
+  captured_on_exit(0, 0)
+
+  local kill_exited_output
+  handler(tools, { action = "kill", session_id = captured_session_id }, {
+    output_cb = function(data)
+      kill_exited_output = data
+    end,
+  })
+  MiniTest.expect.equality("success", kill_exited_output.status)
+  MiniTest.expect.equality("already exited", kill_exited_output.data.kill_info)
+  MiniTest.expect.equality(
+    captured_file_path,
+    kill_exited_output.data.file_path,
+    "kill of exited session should return preserved file_path"
+  )
+
+  for _, removed_path in ipairs(removed_paths) do
+    MiniTest.expect.equality(
+      false,
+      removed_path == captured_file_path,
+      "os.remove should not delete the exited session's output file"
+    )
+  end
+end
+
+T["tool: background output file is preserved on spawn failure"] = function()
+  -- Intent: Verify that a failed sandbox.run spawn in background mode does
+  -- not delete the already-created output file.
+  local tool_mod = require("codecompanion._extensions.run_bash.tool")
+
+  local captured_path
+  uv.fs_open = function(path, mode, permissions)
+    captured_path = path
+    return 999
+  end
+  uv.fs_close = function() end
+  uv.new_timer = function()
+    return {
+      start = function() end,
+      stop = function() end,
+      close = function() end,
+      is_closing = function()
+        return true
+      end,
+    }
+  end
+
+  local removed_paths = {}
+  os.remove = function(path)
+    table.insert(removed_paths, path)
+    return true
+  end
+
+  sandbox_mod.run = function()
+    return nil, "mock error", false
+  end
+
+  local def = tool_mod.create({ enabled = false })
+  local handler = def.cmds[1]
+
+  local output_data
+  handler({ tool = { opts = { sandbox = { enabled = false } } } }, {
+    cmd = "echo test",
+    bg_after = 1,
+  }, {
+    output_cb = function(data)
+      output_data = data
+    end,
+  })
+
+  MiniTest.expect.equality("error", output_data.status)
+  MiniTest.expect.equality(
+    true,
+    captured_path ~= nil,
+    "fs_open should capture the output file path"
+  )
+
+  for _, removed_path in ipairs(removed_paths) do
+    MiniTest.expect.equality(
+      false,
+      removed_path == captured_path,
+      "os.remove should not delete the output file on spawn failure"
+    )
   end
 end
 
