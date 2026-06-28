@@ -513,4 +513,88 @@ function Helpers.run_simple_chat_test(opts)
   child.stop()
 end
 
+-- Tracks currently active global mocks across nested with_mocks calls.
+local active = {}
+
+---Run a function with temporary global mocks, automatic restoration, and nested-call guard.
+---Supports dotted keys ("vim.uv.spawn") and nested module-key forms.
+---@param mocks table mapping keys to mock values
+---@param fn function body to run under mocks
+---@return ... body return values
+function Helpers.with_mocks(mocks, fn)
+  if type(mocks) ~= "table" or type(fn) ~= "function" then
+    error("with_mocks expects (table, function)", 2)
+  end
+
+  local function resolve_path(path)
+    local parts = {}
+    for part in string.gmatch(path, "[^.]+") do
+      table.insert(parts, part)
+    end
+
+    local obj = _G
+    for i = 1, #parts - 1 do
+      obj = obj[parts[i]]
+    end
+
+    return obj, parts[#parts]
+  end
+
+  local function collect_targets(prefix, spec, targets)
+    for key, value in pairs(spec) do
+      if type(key) ~= "string" then
+        error("mock keys must be strings", 2)
+      end
+
+      local path = prefix and (prefix .. "." .. key) or key
+
+      if type(value) == "table" and not (key:find("%.") or prefix) then
+        -- Treat nested tables as namespace specs (e.g. { vim = { uv = { spawn = fn } } }).
+        -- Dotted keys are always leaf paths.
+        collect_targets(path, value, targets)
+      else
+        local obj, final_key = resolve_path(path)
+        table.insert(targets, { obj = obj, key = final_key, value = value, path = path })
+      end
+    end
+  end
+
+  local targets = {}
+  collect_targets(nil, mocks, targets)
+
+  for _, t in ipairs(targets) do
+    if active[t.obj] and active[t.obj][t.key] then
+      error("nested mock detected for " .. t.path, 2)
+    end
+  end
+
+  local saved = {}
+  for _, t in ipairs(targets) do
+    table.insert(saved, { obj = t.obj, key = t.key, orig = t.obj[t.key] })
+    active[t.obj] = active[t.obj] or {}
+    active[t.obj][t.key] = true
+    t.obj[t.key] = t.value
+  end
+
+  local results = { pcall(fn) }
+  local ok = table.remove(results, 1)
+
+  for i = #saved, 1, -1 do
+    local s = saved[i]
+    s.obj[s.key] = s.orig
+    if active[s.obj] then
+      active[s.obj][s.key] = nil
+      if next(active[s.obj]) == nil then
+        active[s.obj] = nil
+      end
+    end
+  end
+
+  if not ok then
+    error(results[1], 0)
+  end
+
+  return unpack(results)
+end
+
 return Helpers

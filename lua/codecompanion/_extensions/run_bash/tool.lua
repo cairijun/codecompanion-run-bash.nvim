@@ -24,20 +24,21 @@ local STATUS_KILLED = "killed"
 ---Avoids blocking io.open in libuv callbacks.
 ---@param path string
 ---@param callback fun(err: string|nil, data: string|nil)
-local function read_file_async(path, callback)
-  local fd, err = uv.fs_open(path, "r", 384)
+---@param fs_api table libuv fs API table (must expose fs_open, fs_fstat, fs_read, fs_close)
+local function read_file_async(path, callback, fs_api)
+  local fd, err = fs_api.fs_open(path, "r", 384)
   if not fd then
     callback(err or "fs_open failed", nil)
     return
   end
-  local stat = uv.fs_fstat(fd)
+  local stat = fs_api.fs_fstat(fd)
   if not stat then
-    uv.fs_close(fd)
+    fs_api.fs_close(fd)
     callback("fs_fstat failed", nil)
     return
   end
-  local data = uv.fs_read(fd, stat.size, 0)
-  uv.fs_close(fd)
+  local data = fs_api.fs_read(fd, stat.size, 0)
+  fs_api.fs_close(fd)
   callback(nil, data or "")
 end
 
@@ -62,8 +63,15 @@ end
 local SessionRegistry = {}
 SessionRegistry.__index = SessionRegistry
 
-function SessionRegistry.new()
-  return setmetatable({ bg_sessions = {}, fg_procs = {} }, SessionRegistry)
+function SessionRegistry.new(deps)
+  deps = deps or {}
+  local instance = setmetatable({ bg_sessions = {}, fg_procs = {} }, SessionRegistry)
+  instance._deps = {
+    uv = deps.uv or uv,
+    sandbox = deps.sandbox or sandbox,
+    os_remove = deps.os_remove or os.remove,
+  }
+  return instance
 end
 
 function SessionRegistry:add_bg(session_id, session_data)
@@ -80,7 +88,7 @@ function SessionRegistry:remove_bg(session_id)
   if session then
     close_timer(session.timer)
     if session.fd then
-      pcall(uv.fs_close, session.fd)
+      pcall(self._deps.uv.fs_close, session.fd)
     end
     self.bg_sessions[session_id] = nil
   end
@@ -98,19 +106,19 @@ end
 function SessionRegistry:cleanup_all()
   for _, session in pairs(self.bg_sessions) do
     if session.status == STATUS_RUNNING then
-      sandbox.kill(session.sandbox_name, session.pid)
+      self._deps.sandbox.kill(session.sandbox_name, session.pid)
     end
     if session.fd then
-      pcall(uv.fs_close, session.fd)
+      pcall(self._deps.uv.fs_close, session.fd)
     end
     close_timer(session.timer)
   end
   for pid, info in pairs(self.fg_procs) do
-    sandbox.kill(info.sandbox_name, pid)
+    self._deps.sandbox.kill(info.sandbox_name, pid)
     if info.fd then
-      pcall(uv.fs_close, info.fd)
+      pcall(self._deps.uv.fs_close, info.fd)
     end
-    pcall(os.remove, info.file_path)
+    pcall(self._deps.os_remove, info.file_path)
   end
 end
 
@@ -120,80 +128,22 @@ function SessionRegistry:gen_session_id()
   return fmt("%d-%d-%d", os.time(), self._id_counter, math.random(10000, 99999))
 end
 
-local registry = SessionRegistry.new()
+local M = {}
 
--- ── Shared on_exit handler factory ──────────────────────────────────────
+-- Test-only internals; not part of the public API.
+M._internal = {
+  SessionRegistry = SessionRegistry,
+  strip_ansi = strip_ansi,
+}
 
----Build an on_exit callback shared by foreground and background execution.
----Conditional kill, fd close, async output read, and cleanup
----are handled here, branching on params.is_bg for mode-specific logic.
----@param params table { sandbox_name, fd, file_path, is_bg, session_id,
----  sandbox_used, timer?, kill_timer?, timed_out?, output_cb?, pid? }
----  params.pid is set after uv.spawn returns.
----@return function on_exit
-local function make_on_exit_handler(params)
-  return function(code, signal)
-    local pid = params.pid
+local default_registry = SessionRegistry.new({ uv = uv, sandbox = sandbox, os_remove = os.remove })
 
-    -- Background: skip if session was already killed by handle_kill
-    if params.is_bg then
-      local session = registry:get_bg(params.session_id)
-      if session and session.status == STATUS_KILLED then
-        return
-      end
-    end
-
-    -- Conditional kill on abnormal exit
-    if (signal and signal ~= 0) or code > 128 then
-      sandbox.kill(params.sandbox_name, pid)
-    end
-    pcall(uv.fs_close, params.fd)
-
-    if params.is_bg then
-      local session = registry:get_bg(params.session_id)
-      if session then
-        session.status = STATUS_EXITED
-        session.exit_code = code
-        -- Background output files are intentionally not removed. A background
-        -- command may exit or be killed at any time; keeping the file lets the
-        -- bg_after timer or the user/agent read the final output afterward.
-        -- Neovim's temp directory cleanup handles removal on exit.
-        if session.timer_fired then
-          registry:remove_bg(params.session_id)
-        end
-      end
-    else
-      -- Foreground: read output async and send response
-      read_file_async(params.file_path, function(_, content)
-        content = strip_ansi(content or "")
-        pcall(os.remove, params.file_path)
-        close_timer(params.timer)
-        close_timer(params.kill_timer)
-        registry:remove_fg(pid)
-        vim.schedule(function()
-          local status
-          if params.timed_out.value or code ~= 0 or signal ~= 0 then
-            status = "error"
-          else
-            status = "success"
-          end
-          params.output_cb({
-            status = status,
-            data = {
-              output = content,
-              exit_code = code,
-              signal = signal,
-              timed_out = params.timed_out.value,
-              sandbox_active = params.sandbox_used,
-            },
-          })
-        end)
-      end)
-    end
-  end
+-- Weak table tracking registries for module-level cleanup.
+-- Keys are registry references; weak keys let collected registries drop out.
+local tracked_registries = setmetatable({}, { __mode = "k" })
+local function track_registry(r)
+  tracked_registries[r] = true
 end
-
--- ── Handler sub-functions ─────────────────────────────────────────────
 
 ---Validate args for the 'run' action.
 ---@param args table
@@ -219,257 +169,332 @@ local function validate_args(args)
   return nil
 end
 
----Handle the 'kill' action: terminate a background session.
----@param session_id string|nil
----@param opts table
-local function handle_kill(session_id, opts)
-  local session = registry:get_bg(session_id)
-  if not session then
-    opts.output_cb({
-      status = "error",
-      data = { error = "session not found: " .. (session_id or "?") },
-    })
-    return
+---Create a tool definition table
+---@param sandbox_opts table|nil Sandbox config subtable
+---@param deps table|nil Optional dependency overrides
+---@return table tool_definition
+function M.create(sandbox_opts, deps)
+  deps = deps or {}
+  deps.sandbox = deps.sandbox or sandbox
+  deps.uv = deps.uv or uv
+  deps.os_remove = deps.os_remove or os.remove
+  deps.vim_schedule = deps.vim_schedule or vim.schedule
+  deps.registry = deps.registry or default_registry
+
+  track_registry(deps.registry)
+
+  -- ── Shared on_exit handler factory ──────────────────────────────────────
+
+  ---Build an on_exit callback shared by foreground and background execution.
+  ---Conditional kill, fd close, async output read, and cleanup
+  ---are handled here, branching on params.is_bg for mode-specific logic.
+  ---@param params table { sandbox_name, fd, file_path, is_bg, session_id,
+  ---  sandbox_used, timer?, kill_timer?, timed_out?, output_cb?, pid? }
+  ---  params.pid is set after uv.spawn returns.
+  ---@return function on_exit
+  local function make_on_exit_handler(params)
+    return function(code, signal)
+      local pid = params.pid
+
+      -- Background: skip if session was already killed by handle_kill
+      if params.is_bg then
+        local session = deps.registry:get_bg(params.session_id)
+        if session and session.status == STATUS_KILLED then
+          return
+        end
+      end
+
+      -- Conditional kill on abnormal exit
+      if (signal and signal ~= 0) or code > 128 then
+        deps.sandbox.kill(params.sandbox_name, pid)
+      end
+      pcall(deps.uv.fs_close, params.fd)
+
+      if params.is_bg then
+        local session = deps.registry:get_bg(params.session_id)
+        if session then
+          session.status = STATUS_EXITED
+          session.exit_code = code
+          -- Background output files are intentionally not removed. A background
+          -- command may exit or be killed at any time; keeping the file lets the
+          -- bg_after timer or the user/agent read the final output afterward.
+          -- Neovim's temp directory cleanup handles removal on exit.
+          if session.timer_fired then
+            deps.registry:remove_bg(params.session_id)
+          end
+        end
+      else
+        -- Foreground: read output async and send response
+        read_file_async(params.file_path, function(_, content)
+          content = strip_ansi(content or "")
+          pcall(deps.os_remove, params.file_path)
+          close_timer(params.timer)
+          close_timer(params.kill_timer)
+          deps.registry:remove_fg(pid)
+          deps.vim_schedule(function()
+            local status
+            if params.timed_out.value or code ~= 0 or signal ~= 0 then
+              status = "error"
+            else
+              status = "success"
+            end
+            params.output_cb({
+              status = status,
+              data = {
+                output = content,
+                exit_code = code,
+                signal = signal,
+                timed_out = params.timed_out.value,
+                sandbox_active = params.sandbox_used,
+              },
+            })
+          end)
+        end, deps.uv)
+      end
+    end
   end
-  if session.status == STATUS_EXITED then
-    close_timer(session.timer)
-    opts.output_cb({
-      status = "success",
-      data = {
-        kill_info = "already exited",
-        exit_code = session.exit_code,
-        session_id = session_id,
-        file_path = session.file_path,
-      },
-    })
-    return
-  end
-  -- Session is running: kill the entire process group.
-  -- Do not delete the output file on kill; the user/agent may still read the
-  -- final output after termination.
-  -- sandbox.kill handles both sandbox and non-sandbox paths internally;
-  -- tool layer delegates via callback regardless of sandbox mode.
-  local pid = session.pid
-  local file_path = session.file_path
-  session.status = STATUS_KILLED
-  registry:remove_bg(session_id)
-  sandbox.kill(session.sandbox_name, pid, function()
-    vim.schedule(function()
+
+  -- ── Handler sub-functions ─────────────────────────────────────────────
+
+  ---Handle the 'kill' action: terminate a background session.
+  ---@param session_id string|nil
+  ---@param opts table
+  local function handle_kill(session_id, opts)
+    local session = deps.registry:get_bg(session_id)
+    if not session then
+      opts.output_cb({
+        status = "error",
+        data = { error = "session not found: " .. (session_id or "?") },
+      })
+      return
+    end
+    if session.status == STATUS_EXITED then
+      close_timer(session.timer)
       opts.output_cb({
         status = "success",
         data = {
-          kill_info = "killed",
+          kill_info = "already exited",
+          exit_code = session.exit_code,
           session_id = session_id,
-          pid = pid,
-          file_path = file_path,
+          file_path = session.file_path,
         },
       })
-    end)
-  end)
-end
-
----Spawn a command in background mode.
----@param sandbox_opts table|nil Runtime sandbox config
----@param args table Tool args
----@param tools table Tools object
----@param opts table Output opts
-local function spawn_background(sandbox_opts, args, tools, opts)
-  local use_sandbox = sandbox.should_use(args, sandbox_opts)
-  local session_id = registry:gen_session_id()
-  local file_path = vim.fn.tempname()
-  local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
-  local bg_after = tonumber(args.bg_after) or 0
-
-  local fd = uv.fs_open(file_path, "w", 384)
-  if not fd then
-    opts.output_cb({
-      status = "error",
-      data = { output = "fs_open failed: " .. file_path },
-    })
-    return
-  end
-
-  local on_exit_params = {
-    sandbox_name = sandbox_name,
-    fd = fd,
-    file_path = file_path,
-    is_bg = true,
-    session_id = session_id,
-    sandbox_used = use_sandbox,
-  }
-  local on_exit = make_on_exit_handler(on_exit_params)
-
-  local handle, pid_or_err, sandbox_used
-  handle, pid_or_err, sandbox_used = sandbox.run(sandbox_opts, {
-    cmd = args.cmd,
-    fd = fd,
-    file_path = file_path,
-    use_sandbox = use_sandbox,
-    sandbox_name = sandbox_name,
-    on_exit = on_exit,
-  })
-  on_exit_params.pid = pid_or_err
-
-  if not handle then
-    pcall(uv.fs_close, fd)
-    opts.output_cb({
-      status = "error",
-      data = { output = "spawn failed: " .. tostring(pid_or_err) },
-    })
-    return
-  end
-
-  registry:add_bg(session_id, {
-    pid = pid_or_err,
-    handle = handle,
-    fd = fd,
-    file_path = file_path,
-    status = STATUS_RUNNING,
-    exit_code = nil,
-    timer = nil,
-    timer_fired = false,
-    sandbox_name = sandbox_name,
-  })
-
-  local timer = uv.new_timer()
-  registry:get_bg(session_id).timer = timer
-
-  local bg_after_ms = bg_after * 1000
-  timer:start(bg_after_ms, 0, function()
-    local session = registry:get_bg(session_id)
-    if not session or session.status == STATUS_KILLED then
       return
     end
-    session.timer_fired = true
-    if session.status == STATUS_EXITED then
-      -- Process exited before timer fired: read full output and report
-      local exit_code = session.exit_code
-      local fp = session.file_path
-      read_file_async(fp, function(_, content)
-        content = strip_ansi(content or "")
-        -- Clean up session registry entry; the output file is preserved.
-        registry:remove_bg(session_id)
-        vim.schedule(function()
-          opts.output_cb({
-            status = exit_code == 0 and "success" or "error",
-            data = {
-              output = content,
-              exit_code = exit_code,
-              bg_exited = true,
-              session_id = session_id,
-              file_path = fp,
-              sandbox_active = sandbox_used,
-            },
-          })
-        end)
+    -- Session is running: kill the entire process group.
+    -- Do not delete the output file on kill; the user/agent may still read the
+    -- final output after termination.
+    -- sandbox.kill handles both sandbox and non-sandbox paths internally;
+    -- tool layer delegates via callback regardless of sandbox mode.
+    local pid = session.pid
+    local file_path = session.file_path
+    session.status = STATUS_KILLED
+    deps.registry:remove_bg(session_id)
+    deps.sandbox.kill(session.sandbox_name, pid, function()
+      deps.vim_schedule(function()
+        opts.output_cb({
+          status = "success",
+          data = {
+            kill_info = "killed",
+            session_id = session_id,
+            pid = pid,
+            file_path = file_path,
+          },
+        })
       end)
-    else
-      read_file_async(session.file_path, function(_, content)
-        content = strip_ansi(content or "")
-        vim.schedule(function()
-          opts.output_cb({
-            status = "success",
-            data = {
-              output = content,
-              session_id = session_id,
-              file_path = session.file_path,
-              bg_running = true,
-              pid = pid_or_err,
-              sandbox_active = sandbox_used,
-            },
-          })
-        end)
-      end)
-    end
-  end)
-end
-
----Spawn a command in foreground mode.
----@param sandbox_opts table|nil Runtime sandbox config
----@param args table Tool args
----@param tools table Tools object
----@param opts table Output opts
-local function spawn_foreground(sandbox_opts, args, tools, opts)
-  local use_sandbox = sandbox.should_use(args, sandbox_opts)
-  local session_id = registry:gen_session_id()
-  local file_path = vim.fn.tempname()
-  local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
-  local timeout = tonumber(args.timeout) or DEFAULT_TIMEOUT
-  local timeout_ms = timeout * 1000
-
-  local fd = uv.fs_open(file_path, "w", 384)
-  if not fd then
-    opts.output_cb({
-      status = "error",
-      data = { output = "fs_open failed: " .. file_path },
-    })
-    return
+    end)
   end
 
-  local timed_out = { value = false }
-  local timer = uv.new_timer()
-  local kill_timer = uv.new_timer()
+  ---Spawn a command in background mode.
+  ---@param sandbox_opts table|nil Runtime sandbox config
+  ---@param args table Tool args
+  ---@param tools table Tools object
+  ---@param opts table Output opts
+  local function spawn_background(sandbox_opts, args, tools, opts)
+    local use_sandbox = deps.sandbox.should_use(args, sandbox_opts)
+    local session_id = deps.registry:gen_session_id()
+    local file_path = vim.fn.tempname()
+    local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
+    local bg_after = tonumber(args.bg_after) or 0
 
-  local on_exit_params = {
-    sandbox_name = sandbox_name,
-    fd = fd,
-    file_path = file_path,
-    is_bg = false,
-    sandbox_used = use_sandbox,
-    timer = timer,
-    kill_timer = kill_timer,
-    timed_out = timed_out,
-    output_cb = opts.output_cb,
-  }
-  local on_exit = make_on_exit_handler(on_exit_params)
+    local fd = deps.uv.fs_open(file_path, "w", 384)
+    if not fd then
+      opts.output_cb({
+        status = "error",
+        data = { output = "fs_open failed: " .. file_path },
+      })
+      return
+    end
 
-  local handle, pid_or_err, sandbox_used
-  handle, pid_or_err, sandbox_used = sandbox.run(sandbox_opts, {
-    cmd = args.cmd,
-    fd = fd,
-    file_path = file_path,
-    use_sandbox = use_sandbox,
-    sandbox_name = sandbox_name,
-    on_exit = on_exit,
-  })
-  on_exit_params.pid = pid_or_err
+    local on_exit_params = {
+      sandbox_name = sandbox_name,
+      fd = fd,
+      file_path = file_path,
+      is_bg = true,
+      session_id = session_id,
+      sandbox_used = use_sandbox,
+    }
+    local on_exit = make_on_exit_handler(on_exit_params)
 
-  if not handle then
-    close_timer(timer)
-    close_timer(kill_timer)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-    opts.output_cb({
-      status = "error",
-      data = { output = "spawn failed: " .. tostring(pid_or_err) },
+    local handle, pid_or_err, sandbox_used
+    handle, pid_or_err, sandbox_used = deps.sandbox.run(sandbox_opts, {
+      cmd = args.cmd,
+      fd = fd,
+      file_path = file_path,
+      use_sandbox = use_sandbox,
+      sandbox_name = sandbox_name,
+      on_exit = on_exit,
     })
-    return
+    on_exit_params.pid = pid_or_err
+
+    if not handle then
+      pcall(deps.uv.fs_close, fd)
+      opts.output_cb({
+        status = "error",
+        data = { output = "spawn failed: " .. tostring(pid_or_err) },
+      })
+      return
+    end
+
+    deps.registry:add_bg(session_id, {
+      pid = pid_or_err,
+      handle = handle,
+      fd = fd,
+      file_path = file_path,
+      status = STATUS_RUNNING,
+      exit_code = nil,
+      timer = nil,
+      timer_fired = false,
+      sandbox_name = sandbox_name,
+    })
+
+    local timer = deps.uv.new_timer()
+    deps.registry:get_bg(session_id).timer = timer
+
+    local bg_after_ms = bg_after * 1000
+    timer:start(bg_after_ms, 0, function()
+      local session = deps.registry:get_bg(session_id)
+      if not session or session.status == STATUS_KILLED then
+        return
+      end
+      session.timer_fired = true
+      if session.status == STATUS_EXITED then
+        -- Process exited before timer fired: read full output and report
+        local exit_code = session.exit_code
+        local fp = session.file_path
+        read_file_async(fp, function(_, content)
+          content = strip_ansi(content or "")
+          -- Clean up session registry entry; the output file is preserved.
+          deps.registry:remove_bg(session_id)
+          deps.vim_schedule(function()
+            opts.output_cb({
+              status = exit_code == 0 and "success" or "error",
+              data = {
+                output = content,
+                exit_code = exit_code,
+                bg_exited = true,
+                session_id = session_id,
+                file_path = fp,
+                sandbox_active = sandbox_used,
+              },
+            })
+          end)
+        end, deps.uv)
+      else
+        read_file_async(session.file_path, function(_, content)
+          content = strip_ansi(content or "")
+          deps.vim_schedule(function()
+            opts.output_cb({
+              status = "success",
+              data = {
+                output = content,
+                session_id = session_id,
+                file_path = session.file_path,
+                bg_running = true,
+                pid = pid_or_err,
+                sandbox_active = sandbox_used,
+              },
+            })
+          end)
+        end, deps.uv)
+      end
+    end)
   end
 
-  registry:add_fg(pid_or_err, { file_path = file_path, fd = fd, sandbox_name = sandbox_name })
+  ---Spawn a command in foreground mode.
+  ---@param sandbox_opts table|nil Runtime sandbox config
+  ---@param args table Tool args
+  ---@param tools table Tools object
+  ---@param opts table Output opts
+  local function spawn_foreground(sandbox_opts, args, tools, opts)
+    local use_sandbox = deps.sandbox.should_use(args, sandbox_opts)
+    local session_id = deps.registry:gen_session_id()
+    local file_path = vim.fn.tempname()
+    local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
+    local timeout = tonumber(args.timeout) or DEFAULT_TIMEOUT
+    local timeout_ms = timeout * 1000
 
-  timer:start(timeout_ms, 0, function()
-    timed_out.value = true
-    if sandbox_name then
-      -- Sandbox: sandlock kill handles full cleanup
-      sandbox.kill(sandbox_name, pid_or_err)
-    else
-      -- Non-sandbox: two-stage SIGTERM → SIGKILL
-      pcall(uv.kill, -pid_or_err, "sigterm")
-      kill_timer:start(2000, 0, function()
-        pcall(uv.kill, -pid_or_err, "sigkill")
-      end)
+    local fd = deps.uv.fs_open(file_path, "w", 384)
+    if not fd then
+      opts.output_cb({
+        status = "error",
+        data = { output = "fs_open failed: " .. file_path },
+      })
+      return
     end
-  end)
-end
 
-local M = {}
+    local timed_out = { value = false }
+    local timer = deps.uv.new_timer()
 
----Create a tool definition table
----@param sandbox_opts table|nil Sandbox config subtable
----@return table tool_definition
-function M.create(sandbox_opts)
-  local sandbox_available = sandbox.is_available(sandbox_opts)
+    local on_exit_params = {
+      sandbox_name = sandbox_name,
+      fd = fd,
+      file_path = file_path,
+      is_bg = false,
+      sandbox_used = use_sandbox,
+      timer = timer,
+      kill_timer = nil,
+      timed_out = timed_out,
+      output_cb = opts.output_cb,
+    }
+    local on_exit = make_on_exit_handler(on_exit_params)
+
+    local handle, pid_or_err, sandbox_used
+    handle, pid_or_err, sandbox_used = deps.sandbox.run(sandbox_opts, {
+      cmd = args.cmd,
+      fd = fd,
+      file_path = file_path,
+      use_sandbox = use_sandbox,
+      sandbox_name = sandbox_name,
+      on_exit = on_exit,
+    })
+    on_exit_params.pid = pid_or_err
+
+    if not handle then
+      close_timer(timer)
+      pcall(deps.uv.fs_close, fd)
+      pcall(deps.os_remove, file_path)
+      opts.output_cb({
+        status = "error",
+        data = { output = "spawn failed: " .. tostring(pid_or_err) },
+      })
+      return
+    end
+
+    deps.registry:add_fg(
+      pid_or_err,
+      { file_path = file_path, fd = fd, sandbox_name = sandbox_name }
+    )
+
+    timer:start(timeout_ms, 0, function()
+      timed_out.value = true
+      -- Delegate kill to sandbox layer for both sandbox and non-sandbox paths,
+      -- keeping two-stage termination logic in one place.
+      deps.sandbox.kill(sandbox_name, pid_or_err)
+    end)
+  end
+
+  local sandbox_available = deps.sandbox.is_available(sandbox_opts)
 
   -- ── Dynamic tool description ─────────────────────────────────────────
   local tool_desc
@@ -742,7 +767,9 @@ end
 ---Cleanup function for VimLeavePre
 ---Kills all background sessions and foreground processes, closes fds, removes temp files
 function M.cleanup()
-  registry:cleanup_all()
+  for registry, _ in pairs(tracked_registries) do
+    registry:cleanup_all()
+  end
 end
 
 return M

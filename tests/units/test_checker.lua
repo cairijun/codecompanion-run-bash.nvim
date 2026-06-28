@@ -245,21 +245,27 @@ do
   local checker = require("codecompanion._extensions.run_bash.checker")
 
   T["exception: parse failure returns true"] = function()
-    -- Save original function
-    local orig_get_string_parser = vim.treesitter.get_string_parser
+    -- Intent: When parser factory is injected and throws, checker must
+    -- conservatively require approval without touching global vim.treesitter.
+    local c = checker.new(checker.defaults, {
+      get_string_parser = function()
+        error("injected failure")
+      end,
+    })
 
-    -- Replace with failing function
-    vim.treesitter.get_string_parser = function()
-      error("mock parse failure")
-    end
+    MiniTest.expect.equality(true, c:check_require_approval("some command"))
+  end
 
-    local c = checker.new(checker.defaults)
-    local result = c:check_require_approval("some command")
+  T["exception: empty command with failing parser returns false"] = function()
+    -- Nil/empty input should short-circuit before parsing.
+    local c = checker.new(checker.defaults, {
+      get_string_parser = function()
+        error("injected failure")
+      end,
+    })
 
-    -- Restore
-    vim.treesitter.get_string_parser = orig_get_string_parser
-
-    MiniTest.expect.equality(true, result)
+    MiniTest.expect.equality(false, c:check_require_approval(""))
+    MiniTest.expect.equality(false, c:check_require_approval(nil))
   end
 end
 

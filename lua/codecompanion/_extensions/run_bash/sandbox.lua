@@ -59,8 +59,11 @@ local XDG_FALLBACKS = {
 ---Expand a single path: normalize → XDG fallback → (optional) existence check
 ---@param path string  Raw path (may contain ~ and $VAR)
 ---@param check_existence boolean  Whether to check path existence (false for fs_denied)
+---@param fs_stat? function  Optional fs_stat override (defaults to vim.uv.fs_stat)
 ---@return string|nil  Expanded normalized absolute path, nil if unresolvable
-local function resolve_path(path, check_existence)
+local function resolve_path(path, check_existence, fs_stat)
+  fs_stat = fs_stat or uv.fs_stat
+
   -- Reject non-string types early (fail-fast)
   if type(path) ~= "string" then
     error("run_bash: rule path must be a string, got " .. type(path))
@@ -86,7 +89,7 @@ local function resolve_path(path, check_existence)
   -- Step 3: existence check (only for fs_readable/fs_writable;
   -- fs_denied skips this — sandlock --fs-deny allows non-existent paths)
   if check_existence then
-    if normalized == "" or not uv.fs_stat(normalized) then
+    if normalized == "" or not fs_stat(normalized) then
       return nil
     end
   end
@@ -98,20 +101,53 @@ end
 ---Non-existent paths silently skipped for -r/-w; --fs-deny always included.
 ---@param rule table|nil  List of path strings
 ---@param flag string       Sandlock CLI flag ("-r", "-w", "--fs-deny")
+---@param fs_stat? function Optional fs_stat override
 ---@return string[]         {flag, path, flag, path, ...}
-local function expand_rule(rule, flag)
+local function expand_rule(rule, flag, fs_stat)
   local result = {}
   local paths = (type(rule) == "table" and rule) or {}
   -- fs_denied does not check existence (sandlock --fs-deny allows non-existent paths)
   local check_existence = flag ~= "--fs-deny"
   for _, path in ipairs(paths) do
-    local resolved = resolve_path(path, check_existence)
+    local resolved = resolve_path(path, check_existence, fs_stat)
     if resolved then
       table.insert(result, flag)
       table.insert(result, resolved)
     end
   end
   return result
+end
+
+---Build the sandlock argument array for a sandboxed command.
+---@param sandbox_opts table Sandbox config ({ profile, rules, extra_args? })
+---@param cmd string Command string to pass to bash -c
+---@param sandbox_name string Sandlock sandbox name
+---@param deps? table Optional dependency overrides { fs_stat? }
+---@return string[] arg_array
+function M.build_sandlock_args(sandbox_opts, cmd, sandbox_name, deps)
+  local rules = sandbox_opts and sandbox_opts.rules or {}
+  local fs_stat = deps and deps.fs_stat or uv.fs_stat
+  local spawn_args = {
+    "run",
+    "--profile-file",
+    sandbox_opts.profile,
+    "--name",
+    sandbox_name,
+    "--port-remap",
+  }
+
+  vim.list_extend(spawn_args, expand_rule(rules.fs_writable, "-w", fs_stat))
+  vim.list_extend(spawn_args, expand_rule(rules.fs_readable, "-r", fs_stat))
+  vim.list_extend(spawn_args, expand_rule(rules.fs_denied, "--fs-deny", fs_stat))
+
+  -- Insert user-configured extra sandlock args before `--`
+  if sandbox_opts.extra_args then
+    vim.list_extend(spawn_args, sandbox_opts.extra_args)
+  end
+
+  vim.list_extend(spawn_args, { "--", "bash", "-c", cmd })
+
+  return spawn_args
 end
 
 ---Check if sandbox mode is available
@@ -143,39 +179,33 @@ end
 ---Run a command.
 ---Returns handle and pid on success, handle=nil and error on failure.
 ---@param sandbox_opts table|nil Sandbox config subtable (used when use_sandbox=true)
----@param exec_params table { cmd, fd, file_path, use_sandbox, sandbox_name?, on_exit }
+---@param exec_params table { cmd, fd, file_path, use_sandbox, sandbox_name?, on_exit, deps? }
 ---@return table|nil handle
 ---@return integer|string|nil pid_or_error
 ---@return boolean sandbox_used
 function M.run(sandbox_opts, exec_params)
   local cmd = exec_params.cmd
   local fd = exec_params.fd
-  local file_path = exec_params.file_path
   local use_sandbox = exec_params.use_sandbox
   local sandbox_name = exec_params.sandbox_name
   local on_exit = exec_params.on_exit
 
+  local deps = exec_params.deps or {}
+  local spawn = deps.spawn or uv.spawn
+  local unref = deps.unref or uv.unref
+  local fs_stat = deps.fs_stat or uv.fs_stat
+
   local executable, spawn_args
 
   if use_sandbox then
-    local rules = sandbox_opts and sandbox_opts.rules or {}
     executable = "sandlock"
-    spawn_args =
-      { "run", "--profile-file", sandbox_opts.profile, "--name", sandbox_name, "--port-remap" }
-    vim.list_extend(spawn_args, expand_rule(rules.fs_writable, "-w"))
-    vim.list_extend(spawn_args, expand_rule(rules.fs_readable, "-r"))
-    vim.list_extend(spawn_args, expand_rule(rules.fs_denied, "--fs-deny"))
-    -- Insert user-configured extra sandlock args before `--`
-    if sandbox_opts.extra_args then
-      vim.list_extend(spawn_args, sandbox_opts.extra_args)
-    end
-    vim.list_extend(spawn_args, { "--", "bash", "-c", cmd })
+    spawn_args = M.build_sandlock_args(sandbox_opts, cmd, sandbox_name, deps)
   else
     executable = "bash"
     spawn_args = { "-c", cmd }
   end
 
-  local handle, pid_or_error = uv.spawn(executable, {
+  local handle, pid_or_error = spawn(executable, {
     args = spawn_args,
     stdio = { nil, fd, fd },
     detached = true,
@@ -186,7 +216,7 @@ function M.run(sandbox_opts, exec_params)
     return nil, pid_or_error, use_sandbox
   end
 
-  uv.unref(handle)
+  unref(handle)
   return handle, pid_or_error, use_sandbox
 end
 
@@ -196,18 +226,26 @@ end
 ---@param on_killed function|nil Callback after kill sequence completes.
 ---  Sandbox: fires when sandlock spawn exits.
 ---  Non-sandbox: fires after SIGTERM grace period + SIGKILL.
-function M.kill(sandbox_name, pid, on_killed)
+---@param deps? table Optional dependency overrides { spawn, close, unref, kill, new_timer }
+function M.kill(sandbox_name, pid, on_killed, deps)
+  deps = deps or {}
+  local spawn = deps.spawn or uv.spawn
+  local close = deps.close or uv.close
+  local unref = deps.unref or uv.unref
+  local kill = deps.kill or uv.kill
+  local new_timer = deps.new_timer or uv.new_timer
+
   if sandbox_name then
     -- Use uv.spawn with args array to prevent shell injection
     -- and avoid blocking the event loop with os.execute
     local handle
-    handle = uv.spawn("sandlock", {
+    handle = spawn("sandlock", {
       args = { "kill", sandbox_name },
       hide = true,
     }, function()
       -- Close handle in on_exit to prevent resource leak — do not rely on GC
       if handle then
-        uv.close(handle)
+        close(handle)
       end
       if on_killed then
         on_killed()
@@ -215,23 +253,27 @@ function M.kill(sandbox_name, pid, on_killed)
     end)
     if handle then
       -- Unref so fire-and-forget kill doesn't keep the event loop alive
-      uv.unref(handle)
+      unref(handle)
+    elseif on_killed then
+      -- Spawn failed (e.g. sandlock removed between availability check and kill);
+      -- still notify the caller so the kill does not hang silently.
+      on_killed()
     end
   else
     -- Non-sandbox: two-stage SIGTERM → SIGKILL.
     -- SIGTERM allows processes (e.g., docker CLI) to forward the signal to
     -- children and clean up before receiving the final SIGKILL.
-    pcall(uv.kill, -pid, "sigterm")
-    local kill_timer = uv.new_timer()
+    pcall(kill, -pid, "sigterm")
+    local kill_timer = new_timer()
     kill_timer:start(2000, 0, function()
       kill_timer:close()
-      pcall(uv.kill, -pid, "sigkill")
+      pcall(kill, -pid, "sigkill")
       if on_killed then
         on_killed()
       end
     end)
     -- Unref so fire-and-forget kill doesn't keep the event loop alive
-    uv.unref(kill_timer)
+    unref(kill_timer)
   end
 end
 

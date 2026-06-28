@@ -59,6 +59,14 @@ Test layers:
 - **Unit — init** (`tests/units/test_init.lua`): Config merge, registration, default application. Tests `init.setup()` in isolation.
 - **Integration** (`tests/test_integration.lua`): Full `Chat → run_bash → sandbox → command` pipeline. Only the LLM Adapter is mocked. Tests the contract between run_bash and CodeCompanion — tool registration, approval flow, execution, output formatting — all through the Chat interface, not direct handler calls.
 
+### Testing guidelines
+
+- Prefer real implementations over mocks.
+- Extract pure functions and test them without mocks.
+- Use dependency injection or local stubs instead of global replacements.
+- If a global mock is unavoidable, wrap it with `Helpers.with_mocks` so restoration is guaranteed even on failure.
+- Reserve global mocks for external boundaries that cannot be injected (e.g., LLM adapter in integration tests).
+
 **Boundary:** If a test can pass by calling `tool.create()`, `handler()`, or `require_approval_before()` directly, it belongs in a unit test. Integration tests MUST exercise the Chat interface.
 
 Sandbox tests force-run by default. sandlock missing → fail. `SKIP_SANDBOX_TESTS=1 make test` to skip.
