@@ -56,12 +56,13 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
         run_bash = {
           opts = {
             sandbox = {
-              -- REQUIRED: your sandlock profile path
-              profile = vim.fn.stdpath("config") .. "/agent_bash_sandlock.toml",
+              -- Sandbox backend: "sandlock" (default) or "bubblewrap".
+              -- Set `backend = false` to disable the sandbox entirely.
+              backend = "sandlock",
               -- Rules appended to the profile at runtime
               -- Paths are auto-expanded: `~`, `$VAR`,
               -- and XDG fallbacks (e.g. `$XDG_DATA_HOME` → `~/.local/share`) are resolved
-              -- see [sandbox.lua](lua/codecompanion/_extensions/run_bash/sandbox.lua) for default rules
+              -- see [sandbox/init.lua](lua/codecompanion/_extensions/run_bash/sandbox/init.lua) for default rules
               rules = {
                 -- Extra paths allowed reading at runtime.
                 -- Table = replaces defaults.
@@ -84,11 +85,21 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
                   "~/.gnupg",
                 },
               },
-              -- extra sandlock CLI args (optional)
-              -- useful for older kernels that need degraded protection:
-              -- extra_args = { "--allow-degraded", "signal-scope" },
-              -- or to disable specific protections:
-              -- extra_args = { "--disable", "fs-refer" },
+              backends = {
+                -- Sandlock backend: REQUIRED profile path.
+                -- `extra_args` are passed to `sandlock` before `--`.
+                sandlock = {
+                  profile = vim.fn.stdpath("config") .. "/agent_bash_sandlock.toml",
+                  -- useful for older kernels that need degraded protection:
+                  -- extra_args = { "--allow-degraded", "signal-scope" },
+                },
+                -- Bubblewrap backend (optional alternative). Needs a working
+                -- unprivileged user namespace (`/proc/self/uid_map` valid).
+                -- NOTE: fs_denied supports only existing DIRECTORIES (via --tmpfs).
+                -- Files and non-existent paths are silently skipped — bwrap has
+                -- no clean file-deny primitive. Use sandlock for full coverage.
+                -- bubblewrap = { extra_args = { "--unshare-net" } },
+              },
             },
             -- uncomment to override built-in pause list:
             -- pauselist = {
@@ -161,7 +172,18 @@ allow = [
 
 The sandlock profile does not expand paths dynamically — `~`, `$PWD`. Use the `sandbox.rules` option to add paths that depend on the user's environment. See the [Installation](#installation) section for an example.
 
-Default rules in [`sandbox.lua`](lua/codecompanion/_extensions/run_bash/sandbox.lua) allow common development paths (`.`, cache/tmp locations, etc.) but deliberately exclude paths that MAY include credentials such as `~/.config/gh`, `~/.npmrc`, and `~/.pip`. Add them to `fs_readable` if you are sure they contain no secrets.
+Default rules in [`sandbox/init.lua`](lua/codecompanion/_extensions/run_bash/sandbox/init.lua) allow common development paths (`.`, cache/tmp locations, etc.) but deliberately exclude paths that MAY include credentials such as `~/.config/gh`, `~/.npmrc`, and `~/.pip`. Add them to `fs_readable` if you are sure they contain no secrets.
+
+### Bubblewrap Backend (Alternative)
+
+The `bubblewrap` backend provides sandbox isolation via user namespaces and bind mounts. Enable with `sandbox.backend = "bubblewrap"` and (optionally) configure `sandbox.backends.bubblewrap.extra_args`.
+
+Bubblewrap has a more limited `fs_denied` model than sandlock:
+- Existing **directories** → masked with `--tmpfs PATH`
+- **Files** → silently skipped (no clean denial primitive)
+- **Non-existent paths** → silently skipped, with a one-time `vim.notify_once` warning
+
+For most cases, sandlock (`backend = "sandlock"`) is the recommended option — it covers files and non-existent deny targets. Continue to set `backends.sandlock.profile` with a [sandlock profile](https://github.com/multikernel/sandlock) for full denial coverage.
 
 ## Default Pause List
 

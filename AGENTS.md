@@ -21,12 +21,26 @@ Major files in `lua/codecompanion/_extensions/run_bash/`:
 
 | File | Role |
 |------|------|
-| `init.lua` | Entry point. Config merge, tool registration, approval callback wiring, cleanup on VimLeavePre. |
+| `init.lua` | Entry point. Config merge (incl. legacy→new migration), tool registration, approval callback wiring, cleanup on VimLeavePre. |
 | `checker.lua` | Pause list engine. Treesitter parse bash, resolve proxy commands, match against rules. |
-| `sandbox.lua` | Execution engine. Sandlock or direct bash. uv.spawn, fd lifecycle, process kill. |
-| `tool.lua` | Tool definition. Schema, system prompt, output handlers. Session registry for foreground/background processes. |
+| `sandbox/init.lua` | Facade. Backend name validation, `sandbox_name` generation, `run`/`kill`/`is_available`/`should_use`/`get_description` dispatch by `opts.backend`. |
+| `sandbox/resolver.lua` | Generic path resolution: `resolve_path`, `resolve_fs_rules`, XDG fallback. |
+| `sandbox/backends/sandlock.lua` | sandlock backend: CLI arg construction, availability (`sandlock` exec + profile), validate_opts, named-sandbox run/kill. |
+| `sandbox/backends/bubblewrap.lua` | bubblewrap backend: maps `fs_*` rules to bwrap CLI (`--bind`, `--ro-bind`, `--tmpfs` for dirs only), uid_map availability check, two-stage SIGTERM/SIGKILL kill. |
+| `tool.lua` | Tool definition. Schema, dynamic description (from `sandbox.get_description`), output handlers. Session registry stores `sandbox_opts` + `sandbox_name`; kill passes them through the facade. |
 
-Flow: `init.setup()` registers tool → agent calls tool → handler validates args → `sandbox` decide + spawn → on_exit → output → chat.
+Flow: `init.setup()` registers tool → agent calls tool → handler validates args → `sandbox` facade decides + dispatches to backend → on_exit → output → chat.
+
+Backend interface contract (each backend must implement):
+
+- `is_available(opts) -> boolean`
+- `validate_opts(opts) -> string|nil` (error message or nil)
+- `capabilities() -> { named_sandbox }`
+- `get_description() -> string`
+- `run(opts, exec_params) -> handle|nil, pid|string|nil, sandbox_used:boolean`
+- `kill(opts, sandbox_name, pid, on_killed, deps) -> nil`
+
+The facade returns a 4-tuple `handle, pid, sandbox_used, sandbox_name` from `run()` where `sandbox_name` is non-nil only for backends with `named_sandbox = true`.
 
 ## Approval Logic
 
@@ -54,9 +68,12 @@ make clean     # remove deps
 Test layers:
 
 - **Unit — checker** (`tests/units/test_checker.lua`): Pause list logic, config override, edge cases. Pure logic, no I/O.
-- **Unit — sandbox** (`tests/units/test_sandbox.lua`): Sandbox/non-sandbox exec, kill, output interleave, spy on uv.spawn args. Tests `sandbox.lua` in isolation.
-- **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox.run`.
-- **Unit — init** (`tests/units/test_init.lua`): Config merge, registration, default application. Tests `init.setup()` in isolation.
+- **Unit — resolver** (`tests/units/test_resolver.lua`): Path resolution, XDG fallbacks, `resolve_fs_rules` grouping/dedup/existence checks. Tests `sandbox/resolver.lua` in isolation.
+- **Unit — sandlock backend** (`tests/units/test_backend_sandlock.lua`): CLI args, availability, validate_opts, run/kill spies. Tests `sandbox/backends/sandlock.lua` in isolation.
+- **Unit — bubblewrap backend** (`tests/units/test_backend_bubblewrap.lua`): Bind/connect args mapping, fs_denied dir-vs-file-skip, uid_map availability, two-stage kill. Tests `sandbox/backends/bubblewrap.lua` in isolation.
+- **Unit — sandbox facade** (`tests/units/test_sandbox.lua`): Facade dispatch by `opts.backend`, unknown backend error, `run()` 4th return `sandbox_name`, non-sandbox two-stage kill, end-to-end sandlock exec/kill (skipped if sandlock missing). Tests `sandbox/init.lua` (the facade).
+- **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, registry persistence of `sandbox_opts`/`sandbox_name`, kill opts dispatch, cleanup_all per-entry, dynamic description, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox` facade.
+- **Unit — init** (`tests/units/test_init.lua`): Config merge, default `backend="sandlock"`, legacy→new migration, `validate_backend_opts`, requirement of approval flow. Tests `init.setup()` in isolation.
 - **Integration** (`tests/test_integration.lua`): Full `Chat → run_bash → sandbox → command` pipeline. Only the LLM Adapter is mocked. Tests the contract between run_bash and CodeCompanion — tool registration, approval flow, execution, output formatting — all through the Chat interface, not direct handler calls.
 
 ### Testing guidelines
@@ -69,11 +86,9 @@ Test layers:
 
 **Boundary:** If a test can pass by calling `tool.create()`, `handler()`, or `require_approval_before()` directly, it belongs in a unit test. Integration tests MUST exercise the Chat interface.
 
-Sandbox tests force-run by default. sandlock missing → fail. `SKIP_SANDBOX_TESTS=1 make test` to skip.
-
 ### Agent test caveat
 
 When using `run_bash` to run tests: `run_bash` sandbox enabled by default — sandlock can't nest. Two ways:
 
 - `"skip_sandbox": true` — test outside of sandbox (no nesting conflict).
-- `SKIP_SANDBOX_TESTS=1` — skip sandbox tests entirely, test non-sandbox code only.
+- `SKIP_SANDBOX_TESTS=1` — skip sandbox tests entirely, test non-sandbox code only. DON'T when full tests needed.

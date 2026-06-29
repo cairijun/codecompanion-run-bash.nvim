@@ -72,8 +72,12 @@ local function resolve_rules(user_rules, default_rules)
 end
 
 ---Setup the run_bash extension
+---
+--- Sandbox configuration:
+---   New format: { backend, rules, backends = { <name> = { ... } } }
+---   Legacy format: { profile, extra_args, rules } — auto-migrated to sandlock backend.
 ---@param opts table Configuration options
----@param opts.sandbox? table Sandbox configuration: { enabled, profile, rules, extra_args }
+---@param opts.sandbox? table Sandbox configuration (new or legacy format)
 ---@param opts.pauselist? table Pause list overrides: { cmd = true|false|fun(args): boolean }
 function M.setup(opts)
   opts = opts or {}
@@ -84,10 +88,44 @@ function M.setup(opts)
   -- Create checker instance
   checker_instance = checker.new(merged_pauselist)
 
+  -- Detect and migrate legacy sandbox config (enabled=false) to the new
+  -- backend-based structure before merging defaults, so the default
+  -- backend="sandlock" does not override a disabled sandbox.
+  local user_sandbox = opts.sandbox or {}
+  if user_sandbox.enabled == false and user_sandbox.backend == nil then
+    user_sandbox.backend = false
+  end
+
+  -- Detect and migrate legacy sandbox config (profile/extra_args at top level)
+  -- to the new backend-based structure. Triggered when user provides profile
+  -- without an explicit backend field — keeps existing setups working.
+  if user_sandbox.profile ~= nil and user_sandbox.backend == nil then
+    user_sandbox = {
+      backend = "sandlock",
+      rules = user_sandbox.rules,
+      backends = {
+        sandlock = {
+          profile = user_sandbox.profile,
+          extra_args = user_sandbox.extra_args,
+        },
+      },
+    }
+    vim.notify_once(
+      "run_bash: sandbox config migrated to new backend format (see README for details)",
+      vim.log.levels.INFO
+    )
+  end
+
   -- Merge sandbox defaults: user opts override defaults
-  local sandbox_opts = vim.tbl_deep_extend("force", sandbox.defaults, opts.sandbox or {})
+  local sandbox_opts = vim.tbl_deep_extend("force", sandbox.defaults, user_sandbox)
   -- Resolve fs_* rules with replacement semantics: table replaces, function transforms, nil uses default
-  sandbox_opts.rules = resolve_rules(opts.sandbox and opts.sandbox.rules, sandbox.defaults.rules)
+  sandbox_opts.rules = resolve_rules(user_sandbox.rules, sandbox.defaults.rules)
+
+  -- Validate backend-specific options at setup time to fail fast with a clear message
+  local sandbox_err = sandbox.validate_backend_opts(sandbox_opts)
+  if sandbox_err then
+    error("run_bash: " .. sandbox_err)
+  end
 
   -- Register tool in tools_config
   local tools_config = get_tools_config()
@@ -98,7 +136,7 @@ function M.setup(opts)
     callback = function()
       return tool.create(sandbox_opts)
     end,
-    description = "Execute a Bash command. Sandboxed by default (sandlock).",
+    description = "Execute a Bash command. " .. sandbox.get_description(sandbox_opts),
     opts = {
       sandbox = sandbox_opts,
       require_cmd_approval = true,

@@ -455,7 +455,11 @@ end
 ---@param opts.timeout? number Wait timeout in ms (default 5000)
 function Helpers.run_simple_chat_test(opts)
   local sandbox_opts = opts.sandbox_opts or {}
-  if sandbox_opts.sandbox and sandbox_opts.sandbox.enabled then
+  if
+    sandbox_opts.sandbox
+    and sandbox_opts.sandbox.backend ~= false
+    and sandbox_opts.sandbox.backend ~= nil
+  then
     Helpers.require_sandbox()
   end
 

@@ -25,7 +25,7 @@ T["integration: foreground echo hello succeeds"] = function()
   -- Intent: Verify a simple foreground command produces expected output
   -- through the full Chat → run_bash → sandbox pipeline (non-sandbox mode).
   Helpers.run_simple_chat_test({
-    sandbox_opts = { sandbox = { enabled = false } },
+    sandbox_opts = { sandbox = { backend = false } },
     pre_approve = "echo hello",
     tool_args = { cmd = "echo hello" },
     expected_contains = { "hello" },
@@ -36,7 +36,7 @@ T["integration: foreground false reports failure with exit code"] = function()
   -- Intent: Verify a failing foreground command reports error status with
   -- exit code in the chat output (non-sandbox mode).
   Helpers.run_simple_chat_test({
-    sandbox_opts = { sandbox = { enabled = false } },
+    sandbox_opts = { sandbox = { backend = false } },
     pre_approve = "false",
     tool_args = { cmd = "false" },
     expected_contains = { "Failed", "(exit:" },
@@ -47,7 +47,7 @@ T["integration: timeout kills long-running command"] = function()
   -- Intent: Verify that a foreground command exceeding its timeout is
   -- killed and the output reports the timeout (non-sandbox mode).
   Helpers.run_simple_chat_test({
-    sandbox_opts = { sandbox = { enabled = false } },
+    sandbox_opts = { sandbox = { backend = false } },
     pre_approve = "sleep 10",
     tool_args = { cmd = "sleep 10", timeout = 1 },
     expected_contains = { "timed out" },
@@ -59,7 +59,7 @@ T["integration: background natural exit reports full output"] = function()
   -- Intent: Verify a quick background command that exits naturally
   -- reports its full output in the chat (non-sandbox mode).
   Helpers.run_simple_chat_test({
-    sandbox_opts = { sandbox = { enabled = false } },
+    sandbox_opts = { sandbox = { backend = false } },
     pre_approve = "echo done",
     tool_args = { cmd = "echo done", bg_after = 2 },
     expected_contains = { "done" },
@@ -71,7 +71,11 @@ T["integration: safe command auto-approved in sandbox"] = function()
   -- is auto-approved and produces sandbox active output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
+      },
     },
     tool_args = { cmd = "echo safe" },
     expected_contains = { "safe", Helpers.SANDBOX_ACTIVE },
@@ -83,7 +87,11 @@ T["integration: pause-listed command user accepts"] = function()
   -- by the user, executes successfully with sandbox active output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
+      },
     },
     mock_approval = "Accept",
     tool_args = { cmd = "rm -rf /tmp/cc-test-nonexistent" },
@@ -96,7 +104,11 @@ T["integration: pause-listed command user rejects"] = function()
   -- by the user, produces a "User rejected" message in the chat output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
+      },
     },
     mock_approval = "Reject",
     ui_input_stub = [[vim.ui.input = function(_, cb) cb("test rejection") end]],
@@ -110,7 +122,11 @@ T["integration: sandbox executes command under sandbox"] = function()
   -- under sandbox and produces sandbox active output.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
+      },
     },
     pre_approve = "echo sandboxed",
     tool_args = { cmd = "echo sandboxed" },
@@ -123,7 +139,11 @@ T["integration: skip_sandbox triggers approval then bypasses sandbox"] = functio
   -- and bypasses the sandbox (no sandbox active in output).
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = Helpers.sandbox_profile_path(), rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
+      },
     },
     mock_approval = "Accept",
     tool_args = { cmd = "echo no-sandbox", skip_sandbox = true },
@@ -137,7 +157,11 @@ T["integration: fallback when profile missing triggers approval"] = function()
   -- falls back to requiring approval and runs without sandbox.
   Helpers.run_simple_chat_test({
     sandbox_opts = {
-      sandbox = { enabled = true, profile = "/nonexistent/profile.toml", rules = {} },
+      sandbox = {
+        backend = "sandlock",
+        rules = {},
+        backends = { sandlock = { profile = "/nonexistent/profile.toml" } },
+      },
     },
     mock_approval = "Accept",
     tool_args = { cmd = "echo fallback" },
@@ -153,7 +177,7 @@ T["integration: background mode returns session_id"] = function()
   -- in the initial output and the session can be killed in a second round.
   local child = MiniTest.new_child_neovim()
   Helpers.child_start(child)
-  Helpers.setup_chat_with_run_bash(child, { sandbox = { enabled = false } })
+  Helpers.setup_chat_with_run_bash(child, { sandbox = { backend = false } })
   Helpers.pre_approve_cmd(child, "echo STARTING; sleep 10")
   Helpers.queue_tool_call_response(child, {
     {
@@ -198,7 +222,7 @@ T["integration: background kill via action=kill"] = function()
   -- via action=kill, and the kill output is reported in the latest message.
   local child = MiniTest.new_child_neovim()
   Helpers.child_start(child)
-  Helpers.setup_chat_with_run_bash(child, { sandbox = { enabled = false } })
+  Helpers.setup_chat_with_run_bash(child, { sandbox = { backend = false } })
   -- Round 1: Start background command
   Helpers.pre_approve_cmd(child, "sleep 100")
   Helpers.queue_tool_call_response(child, {
@@ -254,10 +278,13 @@ T["integration: pause-listed command always accept cached on second call"] = fun
   Helpers.mock_approval_prompt(child)
   Helpers.set_approval_choice(child, "Always accept")
   local profile = Helpers.sandbox_profile_path()
-  Helpers.setup_chat_with_run_bash(
-    child,
-    { sandbox = { enabled = true, profile = profile, rules = {} } }
-  )
+  Helpers.setup_chat_with_run_bash(child, {
+    sandbox = {
+      backend = "sandlock",
+      rules = {},
+      backends = { sandlock = { profile = profile } },
+    },
+  })
   -- Round 1
   Helpers.queue_tool_call_response(child, {
     {
@@ -301,10 +328,13 @@ T["integration: write to denied path blocked by sandbox"] = function()
   local child = MiniTest.new_child_neovim()
   Helpers.child_start(child)
   local profile = Helpers.sandbox_profile_path()
-  Helpers.setup_chat_with_run_bash(
-    child,
-    { sandbox = { enabled = true, profile = profile, rules = {} } }
-  )
+  Helpers.setup_chat_with_run_bash(child, {
+    sandbox = {
+      backend = "sandlock",
+      rules = {},
+      backends = { sandlock = { profile = profile } },
+    },
+  })
   Helpers.pre_approve_cmd(
     child,
     "mkdir -p /tmp/cc-run-bash-test-deny; touch /tmp/cc-run-bash-test-deny/test 2>&1"

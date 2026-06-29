@@ -55,7 +55,7 @@ T["init: default sandbox config applied when no opts"] = function()
 
   local s_opts = tools_config.run_bash.opts.sandbox
   MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(true, s_opts.enabled, "sandbox should be enabled by default")
+  MiniTest.expect.equality("sandlock", s_opts.backend, "sandbox should default to sandlock backend")
   MiniTest.expect.equality(
     "table",
     type(s_opts.rules.fs_readable),
@@ -87,9 +87,9 @@ T["init: partial sandbox opts merge with defaults"] = function()
   MiniTest.expect.equality(true, s_opts.rules ~= nil, "default rules should still be present")
 end
 
-T["init: enabled=false disables sandbox"] = function()
-  -- Intent: Verify that user can explicitly disable sandbox by setting
-  -- enabled = false, overriding the default true.
+T["init: legacy enabled=false migrates to backend=false"] = function()
+  -- Intent: Legacy { sandbox = { enabled = false } } must keep sandbox disabled.
+  -- setup() should migrate the legacy flag to backend = false.
   local run_bash = require("codecompanion._extensions.run_bash")
   local tools_config = require("codecompanion.config").interactions.chat.tools
 
@@ -97,8 +97,46 @@ T["init: enabled=false disables sandbox"] = function()
   run_bash.setup({ sandbox = { enabled = false } })
 
   local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(false, s_opts.enabled, "enabled should be false when user overrides")
-  -- Rules from defaults should still be merged in
+  MiniTest.expect.equality(
+    false,
+    s_opts.backend,
+    "legacy enabled=false should migrate to backend=false"
+  )
+  MiniTest.expect.equality(false, s_opts.enabled, "legacy enabled=false should be preserved")
+end
+
+T["init: legacy enabled=true does not override default backend"] = function()
+  -- Intent: Legacy enabled=true alone should not disable the sandbox.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { enabled = true } })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    "sandlock",
+    s_opts.backend,
+    "enabled=true should not change default backend"
+  )
+end
+
+T["init: backend=false disables sandbox"] = function()
+  -- Intent: Verify that user can explicitly disable sandbox by setting
+  -- backend = false, overriding the default "sandlock".
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { backend = false } })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    false,
+    s_opts.backend,
+    "backend should be false (sandbox disabled by user)"
+  )
+  -- Rules from defaults should still be merged in even when sandbox is disabled
   MiniTest.expect.equality(
     "table",
     type(s_opts.rules.fs_readable),
@@ -122,12 +160,23 @@ T["init: partial rules override preserves unset defaults"] = function()
     sandbox = { profile = "/some/profile.toml", rules = { fs_writable = { "/custom/path" } } },
   })
 
+  -- Legacy format (profile + no backend) should auto-migrate to the new structure:
+  -- { backend="sandlock", backends={ sandlock={ profile=... } } }
   local s_opts = tools_config.run_bash.opts.sandbox
-  MiniTest.expect.equality(true, s_opts.enabled, "default enabled should be true")
+  MiniTest.expect.equality(
+    "sandlock",
+    s_opts.backend,
+    "migrated config should use sandlock backend"
+  )
+  MiniTest.expect.equality(
+    "/some/profile.toml",
+    s_opts.backends.sandlock.profile,
+    "user profile should be migrated to backends.sandlock.profile"
+  )
   MiniTest.expect.equality(
     true,
-    s_opts.profile == "/some/profile.toml",
-    "user profile should be set"
+    s_opts.profile == nil,
+    "top-level profile should NOT be preserved after migration"
   )
   MiniTest.expect.equality(
     "table",
@@ -157,18 +206,29 @@ T["init: extra_args merged correctly"] = function()
   tools_config.run_bash = nil
   run_bash.setup({
     sandbox = {
-      enabled = true,
-      extra_args = { "--allow-degraded", "signal-scope" },
+      backend = "sandlock",
+      rules = {},
+      backends = {
+        sandlock = { extra_args = { "--allow-degraded", "signal-scope" } },
+      },
     },
   })
 
   local s_opts = tools_config.run_bash.opts.sandbox
   MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(true, s_opts.enabled ~= nil, "enabled should be present")
-  MiniTest.expect.equality(true, s_opts.extra_args ~= nil, "extra_args should be present")
-  MiniTest.expect.equality(2, #s_opts.extra_args, "extra_args should have 2 elements")
-  MiniTest.expect.equality("--allow-degraded", s_opts.extra_args[1])
-  MiniTest.expect.equality("signal-scope", s_opts.extra_args[2])
+  MiniTest.expect.equality("sandlock", s_opts.backend, "backend should be sandlock")
+  MiniTest.expect.equality(
+    true,
+    s_opts.backends.sandlock.extra_args ~= nil,
+    "backends.sandlock.extra_args should be present"
+  )
+  MiniTest.expect.equality(
+    2,
+    #s_opts.backends.sandlock.extra_args,
+    "extra_args should have 2 elements"
+  )
+  MiniTest.expect.equality("--allow-degraded", s_opts.backends.sandlock.extra_args[1])
+  MiniTest.expect.equality("signal-scope", s_opts.backends.sandlock.extra_args[2])
 end
 
 T["init: extra_args empty when not configured"] = function()
@@ -179,13 +239,31 @@ T["init: extra_args empty when not configured"] = function()
   tools_config.run_bash = nil
   run_bash.setup({
     sandbox = {
-      enabled = true,
+      backend = "sandlock",
+      rules = {},
     },
   })
 
   local s_opts = tools_config.run_bash.opts.sandbox
   MiniTest.expect.equality(true, s_opts ~= nil, "sandbox opts should exist")
-  MiniTest.expect.equality(nil, s_opts.extra_args, "extra_args should be nil when not configured")
+  MiniTest.expect.equality(
+    nil,
+    s_opts.backends.sandlock.extra_args,
+    "backends.sandlock.extra_args should be nil when not configured"
+  )
+end
+
+local function with_should_use_stub(sandbox_mod, return_value, fn)
+  -- Intent: Mock sandbox.should_use and guarantee restoration even if fn errors.
+  local orig = sandbox_mod.should_use
+  sandbox_mod.should_use = function()
+    return return_value
+  end
+  local ok, err = pcall(fn)
+  sandbox_mod.should_use = orig
+  if not ok then
+    error(err, 0)
+  end
 end
 
 -- ── require_approval_before tests ───────────────────────────────
@@ -208,18 +286,42 @@ T["init: require_approval_before auto-approves kill action"] = function()
 end
 
 T["init: require_approval_before requires approval for non-sandbox mode"] = function()
-  -- Intent: Verify that non-sandbox mode (enabled=false) always requires
-  -- approval — should_use returns false when enabled=false.
+  -- Intent: Verify that non-sandbox mode (backend=false) always requires
+  -- approval — should_use returns false when backend=false.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({ sandbox = { backend = false } })
+
+  local fn = tools_config.run_bash.opts.require_approval_before
+  local tool_obj = {
+    args = { cmd = "echo hello" },
+    opts = { sandbox = { backend = false } },
+  }
+  MiniTest.expect.equality(true, fn(tool_obj, {}))
+end
+
+T["init: legacy enabled=false requires approval through full pipeline"] = function()
+  -- Intent: Verify that the legacy enabled=false migration still results in
+  -- a non-sandbox config that requires approval in require_approval_before.
   local run_bash = require("codecompanion._extensions.run_bash")
   local tools_config = require("codecompanion.config").interactions.chat.tools
 
   tools_config.run_bash = nil
   run_bash.setup({ sandbox = { enabled = false } })
 
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    false,
+    s_opts.backend,
+    "legacy enabled=false should migrate to backend=false"
+  )
+
   local fn = tools_config.run_bash.opts.require_approval_before
   local tool_obj = {
     args = { cmd = "echo hello" },
-    opts = { sandbox = { enabled = false } },
+    opts = { sandbox = s_opts },
   }
   MiniTest.expect.equality(true, fn(tool_obj, {}))
 end
@@ -234,21 +336,15 @@ T["init: require_approval_before auto-approves safe sandbox command"] = function
   tools_config.run_bash = nil
   run_bash.setup({ sandbox = { enabled = true } })
 
-  local orig_should_use = sandbox_mod.should_use
-  sandbox_mod.should_use = function()
-    return true
-  end
-
   local fn = tools_config.run_bash.opts.require_approval_before
   local tool_obj = {
     args = { cmd = "echo hello" },
     opts = { sandbox = { enabled = true } },
   }
-  local result = fn(tool_obj, {})
 
-  sandbox_mod.should_use = orig_should_use
-
-  MiniTest.expect.equality(false, result)
+  with_should_use_stub(sandbox_mod, true, function()
+    MiniTest.expect.equality(false, fn(tool_obj, {}))
+  end)
 end
 
 T["init: require_approval_before requires approval for pause-listed command in sandbox"] = function()
@@ -261,21 +357,15 @@ T["init: require_approval_before requires approval for pause-listed command in s
   tools_config.run_bash = nil
   run_bash.setup({ sandbox = { enabled = true } })
 
-  local orig_should_use = sandbox_mod.should_use
-  sandbox_mod.should_use = function()
-    return true
-  end
-
   local fn = tools_config.run_bash.opts.require_approval_before
   local tool_obj = {
     args = { cmd = "rm -rf /tmp/test" },
     opts = { sandbox = { enabled = true } },
   }
-  local result = fn(tool_obj, {})
 
-  sandbox_mod.should_use = orig_should_use
-
-  MiniTest.expect.equality(true, result)
+  with_should_use_stub(sandbox_mod, true, function()
+    MiniTest.expect.equality(true, fn(tool_obj, {}))
+  end)
 end
 
 T["init: require_approval_before requires approval when skip_sandbox=true"] = function()
@@ -474,6 +564,96 @@ T["init: resolve_rules function that throws propagates error"] = function()
   })
 
   MiniTest.expect.equality(false, ok, "should throw error")
+end
+
+-- ── New format / migration tests ─────────────────────────────────────
+
+T["init: new format fully preserves backend, rules, and backends structure"] = function()
+  -- Intent: Verify that the new-format config passes through init.setup()
+  -- unchanged in structure: backend, rules, and backends.<name> are all kept.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local user_rules = {
+    fs_readable = { "/opt" },
+    fs_writable = { "/var/log" },
+    fs_denied = { "/etc/shadow" },
+  }
+  run_bash.setup({
+    sandbox = {
+      backend = "sandlock",
+      rules = user_rules,
+      backends = {
+        sandlock = { profile = "/tmp/test.toml", extra_args = { "--flag1" } },
+      },
+    },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality("sandlock", s_opts.backend)
+  MiniTest.expect.equality(user_rules.fs_readable, s_opts.rules.fs_readable)
+  MiniTest.expect.equality(user_rules.fs_writable, s_opts.rules.fs_writable)
+  MiniTest.expect.equality(user_rules.fs_denied, s_opts.rules.fs_denied)
+  MiniTest.expect.equality("/tmp/test.toml", s_opts.backends.sandlock.profile)
+  MiniTest.expect.equality({ "--flag1" }, s_opts.backends.sandlock.extra_args)
+end
+
+T["init: legacy format migration wraps into backends.sandlock"] = function()
+  -- Intent: Verify that an old-format config (profile + extra_args without
+  -- backend) auto-migrates to backend="sandlock" with profile/extra_args
+  -- moved into backends.sandlock, and top-level extra_args is NOT preserved.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  run_bash.setup({
+    sandbox = {
+      profile = "/tmp/legacy-profile.toml",
+      extra_args = { "-x" },
+      rules = {},
+    },
+  })
+
+  local s_opts = tools_config.run_bash.opts.sandbox
+  MiniTest.expect.equality(
+    "sandlock",
+    s_opts.backend,
+    "legacy config should migrate to sandlock backend"
+  )
+  MiniTest.expect.equality("/tmp/legacy-profile.toml", s_opts.backends.sandlock.profile)
+  MiniTest.expect.equality(
+    { "-x" },
+    s_opts.backends.sandlock.extra_args,
+    "extra_args should migrate to backends.sandlock"
+  )
+  MiniTest.expect.equality(
+    true,
+    s_opts.extra_args == nil,
+    "top-level extra_args should NOT be preserved after migration"
+  )
+end
+
+T["init: validate_opts error propagates as setup() failure"] = function()
+  -- Intent: Verify that an invalid backend-specific config causes setup()
+  -- to raise an error (via sandbox.validate_backend_opts) so misconfiguration
+  -- is caught at startup rather than at tool invocation time.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = {
+      backend = "sandlock",
+      backends = {
+        -- extra_args must be a table or nil, not a string
+        sandlock = { extra_args = "invalid-string-value" },
+      },
+    },
+  })
+
+  MiniTest.expect.equality(false, ok, "setup should throw when backend opts are invalid")
+  MiniTest.expect.equality(true, type(err) == "string", "error message should be a string")
 end
 
 return T

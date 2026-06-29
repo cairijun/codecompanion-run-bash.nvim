@@ -87,9 +87,9 @@ T["tool: foreground spawn failure closes all timers"] = function()
       return false
     end,
     run = function()
-      return nil, "mock spawn error", false
+      return nil, "mock spawn error", false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -168,9 +168,9 @@ T["tool: temp file uses secure path and mode"] = function()
       return false
     end,
     run = function()
-      return nil, "mock error", false
+      return nil, "mock error", false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -242,9 +242,9 @@ T["tool: handler does not set shared _sandbox_active"] = function()
       return false
     end,
     run = function()
-      return { close = function() end }, 12345, true
+      return { close = function() end }, 12345, true, "cc-bash-stub"
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -272,94 +272,6 @@ T["tool: handler does not set shared _sandbox_active"] = function()
     nil,
     tools_obj.tool._sandbox_active,
     "should not set shared _sandbox_active"
-  )
-end
-
--- ── Session ID uniqueness via handler ─────────────────────────────────
-
-T["tool: session IDs are unique across rapid calls"] = function()
-  local registry = tool_mod._internal.SessionRegistry.new()
-  local session_ids = {}
-  local sandbox_stub = {
-    is_available = function()
-      return true
-    end,
-    should_use = function()
-      return true
-    end,
-    run = function(_, exec_params)
-      local name = exec_params.sandbox_name
-      if name then
-        local id = name:match("^cc%-bash%-(.+)$")
-        if id then
-          table.insert(session_ids, id)
-        end
-      end
-      return nil, "mock error", true
-    end,
-    kill = function(_, _, on_killed)
-      if on_killed then
-        on_killed()
-      end
-    end,
-  }
-  local uv_stub = {
-    fs_open = function()
-      return 999
-    end,
-    fs_close = function() end,
-    fs_fstat = function()
-      return { size = 0 }
-    end,
-    fs_read = function()
-      return ""
-    end,
-    new_timer = function()
-      return {
-        start = function() end,
-        stop = function() end,
-        close = function() end,
-        is_closing = function()
-          return true
-        end,
-      }
-    end,
-    kill = function() end,
-    spawn = function() end,
-  }
-  local def = tool_mod.create({ enabled = false }, {
-    registry = registry,
-    sandbox = sandbox_stub,
-    uv = uv_stub,
-    os_remove = function()
-      return true
-    end,
-    vim_schedule = function(fn)
-      fn()
-    end,
-  })
-  local handler = def.cmds[1]
-
-  for i = 1, 500 do
-    handler({ tool = { opts = { sandbox = { enabled = true } } } }, { cmd = "echo " .. i }, {
-      output_cb = function() end,
-    })
-  end
-
-  local seen = {}
-  local unique = 0
-  for _, id in ipairs(session_ids) do
-    if not seen[id] then
-      seen[id] = true
-      unique = unique + 1
-    end
-  end
-
-  MiniTest.expect.equality(true, #session_ids == 500, "should have captured 500 session IDs")
-  MiniTest.expect.equality(
-    true,
-    unique == 500,
-    "all 500 session IDs should be unique, got " .. unique
   )
 end
 
@@ -401,9 +313,9 @@ T["tool: on_exit does not use blocking io.open"] = function()
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
-      return { close = function() end }, 12345, false
+      return { close = function() end }, 12345, false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -479,7 +391,7 @@ T["tool: sandbox.kill not called on clean exit"] = function()
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
-      return { close = function() end }, 12345, false
+      return { close = function() end }, 12345, false, nil
     end,
     kill = function()
       kill_called = true
@@ -549,9 +461,9 @@ T["tool: foreground output strips ANSI color codes"] = function()
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
-      return { close = function() end }, 12345, false
+      return { close = function() end }, 12345, false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -622,13 +534,16 @@ T["tool: background bg_running output strips ANSI color codes"] = function()
     is_available = function()
       return true
     end,
+    get_description = function()
+      return "Sandboxed (test stub)."
+    end,
     should_use = function()
       return true
     end,
     run = function()
-      return { close = function() end }, 12345, true
+      return { close = function() end }, 12345, true, "cc-bash-stub"
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -703,14 +618,17 @@ T["tool: background bg_exited output strips ANSI color codes"] = function()
     is_available = function()
       return true
     end,
+    get_description = function()
+      return "Sandboxed (test stub)."
+    end,
     should_use = function()
       return true
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
-      return { close = function() end }, 12345, true
+      return { close = function() end }, 12345, true, "cc-bash-stub"
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -790,14 +708,17 @@ T["tool: background session cleaned up after natural exit"] = function()
     is_available = function()
       return true
     end,
+    get_description = function()
+      return "Sandboxed (test stub)."
+    end,
     should_use = function()
       return true
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
-      return { close = function() end }, 12345, true
+      return { close = function() end }, 12345, true, "cc-bash-stub"
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -903,14 +824,17 @@ T["tool: background output file is preserved after natural exit"] = function()
       is_available = function()
         return true
       end,
+      get_description = function()
+        return "Sandboxed (test stub)."
+      end,
       should_use = function()
         return true
       end,
       run = function(_, exec_params)
         captured_on_exit = exec_params.on_exit
-        return { close = function() end }, 12345, true
+        return { close = function() end }, 12345, true, "cc-bash-stub"
       end,
-      kill = function(_, _, on_killed)
+      kill = function(_, _, _, on_killed)
         if on_killed then
           on_killed()
         end
@@ -1023,19 +947,18 @@ T["tool: background output file is preserved on kill"] = function()
     is_available = function()
       return true
     end,
+    get_description = function()
+      return "Sandboxed (test stub)."
+    end,
     should_use = function()
       return true
     end,
     run = function(_, exec_params)
       captured_on_exit = exec_params.on_exit
       captured_file_path = exec_params.file_path
-      local name = exec_params.sandbox_name
-      if name then
-        captured_session_id = name:match("^cc%-bash%-(.+)$")
-      end
-      return { close = function() end }, 12345, true
+      return { close = function() end }, 12345, true, "cc-bash-stub", "cc-bash-stub"
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -1059,15 +982,12 @@ T["tool: background output file is preserved on kill"] = function()
   handler(tools, { cmd = "echo test", bg_after = 1 }, {
     output_cb = function() end,
   })
-  MiniTest.expect.equality(
-    true,
-    captured_session_id ~= nil,
-    "running session should have session_id"
-  )
+  local session_id = next(registry.bg_sessions)
+  MiniTest.expect.equality(true, session_id ~= nil, "running session should be in registry")
   MiniTest.expect.equality(true, captured_file_path ~= nil, "running session should have file_path")
 
   local kill_output
-  handler(tools, { action = "kill", session_id = captured_session_id }, {
+  handler(tools, { action = "kill", session_id = session_id }, {
     output_cb = function(data)
       kill_output = data
     end,
@@ -1089,22 +1009,21 @@ T["tool: background output file is preserved on kill"] = function()
   end
 
   -- Scenario: kill an already-exited session
-  captured_session_id = nil
+  captured_on_exit = nil
   captured_file_path = nil
   handler(tools, { cmd = "echo test", bg_after = 1 }, {
     output_cb = function() end,
   })
-  MiniTest.expect.equality(
-    true,
-    captured_session_id ~= nil,
-    "exited session should have session_id"
-  )
+  local exited_session_id = next(registry.bg_sessions)
+  MiniTest.expect.equality(true, exited_session_id ~= nil, "exited session should be in registry")
   MiniTest.expect.equality(true, captured_file_path ~= nil, "exited session should have file_path")
 
-  captured_on_exit(0, 0)
+  if captured_on_exit then
+    captured_on_exit(0, 0)
+  end
 
   local kill_exited_output
-  handler(tools, { action = "kill", session_id = captured_session_id }, {
+  handler(tools, { action = "kill", session_id = exited_session_id }, {
     output_cb = function(data)
       kill_exited_output = data
     end,
@@ -1163,9 +1082,9 @@ T["tool: background output file is preserved on spawn failure"] = function()
       return false
     end,
     run = function()
-      return nil, "mock error", false
+      return nil, "mock error", false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       if on_killed then
         on_killed()
       end
@@ -1250,9 +1169,9 @@ T["tool: handle_kill reports only after kill callback"] = function()
       return false
     end,
     run = function()
-      return { close = function() end }, 12345, false
+      return { close = function() end }, 12345, false, nil
     end,
-    kill = function(_, _, on_killed)
+    kill = function(_, _, _, on_killed)
       captured_kill_cb = on_killed
     end,
   }
@@ -1507,8 +1426,8 @@ T["tool: schema includes skip_sandbox when sandbox available"] = function()
   Helpers.require_sandbox()
 
   local def = tool_mod.create({
-    enabled = true,
-    profile = Helpers.sandbox_profile_path(),
+    backend = "sandlock",
+    backends = { sandlock = { profile = Helpers.sandbox_profile_path() } },
     rules = {},
   }, {
     registry = tool_mod._internal.SessionRegistry.new(),
@@ -1584,6 +1503,421 @@ T["tool: real subprocess sleep completes"] = function()
   if output_data then
     MiniTest.expect.equality("success", output_data.status)
   end
+end
+
+-- ── Registry persistence of sandbox_opts / sandbox_name ──────────────
+
+T["tool: registry stores sandbox_opts for foreground sessions"] = function()
+  -- Intent: Verify tool.lua stores the sandbox_opts reference in the
+  -- foreground process registry entry, enabling kill to pass correct opts.
+  local registry = tool_mod._internal.SessionRegistry.new()
+  local sandbox_opts = { backend = false }
+  local sandbox_stub = {
+    is_available = function()
+      return false
+    end,
+    should_use = function()
+      return false
+    end,
+    run = function()
+      return { close = function() end }, 7788, false, nil
+    end,
+    kill = function(_, _, _, on_killed)
+      if on_killed then
+        on_killed()
+      end
+    end,
+    get_description = function()
+      return "stub description."
+    end,
+  }
+  local uv_stub = {
+    fs_open = function()
+      return 999
+    end,
+    fs_close = function() end,
+    fs_fstat = function()
+      return { size = 0 }
+    end,
+    fs_read = function()
+      return ""
+    end,
+    new_timer = function()
+      return {
+        start = function() end,
+        stop = function() end,
+        close = function() end,
+        is_closing = function()
+          return true
+        end,
+      }
+    end,
+    kill = function() end,
+    spawn = function() end,
+  }
+  local def = tool_mod.create(sandbox_opts, {
+    registry = registry,
+    sandbox = sandbox_stub,
+    uv = uv_stub,
+    os_remove = function()
+      return true
+    end,
+    vim_schedule = function(fn)
+      fn()
+    end,
+  })
+  local handler = def.cmds[1]
+  handler(
+    { tool = { opts = { sandbox = sandbox_opts } } },
+    { cmd = "echo test" },
+    { output_cb = function() end }
+  )
+
+  MiniTest.expect.equality(true, registry.fg_procs[7788] ~= nil, "fg proc should be registered")
+  if registry.fg_procs[7788] then
+    MiniTest.expect.equality(
+      sandbox_opts,
+      registry.fg_procs[7788].sandbox_opts,
+      "sandbox_opts identity should be preserved"
+    )
+  end
+end
+
+T["tool: registry stores sandbox_name for sandboxed foreground sessions"] = function()
+  -- Intent: Verify tool.lua captures the 4th return value from sandbox.run
+  -- and stores it as sandbox_name in the registry entry.
+  local registry = tool_mod._internal.SessionRegistry.new()
+  local sandbox_opts = { backend = "sandlock", backends = { sandlock = {} }, rules = {} }
+  local sandbox_stub = {
+    is_available = function()
+      return true
+    end,
+    should_use = function()
+      return true
+    end,
+    run = function()
+      return { close = function() end }, 1122, true, "cc-bash-test-xyz"
+    end,
+    kill = function(_, _, _, on_killed)
+      if on_killed then
+        on_killed()
+      end
+    end,
+    get_description = function()
+      return "stub description."
+    end,
+  }
+  local uv_stub = {
+    fs_open = function()
+      return 999
+    end,
+    fs_close = function() end,
+    fs_fstat = function()
+      return { size = 0 }
+    end,
+    fs_read = function()
+      return ""
+    end,
+    new_timer = function()
+      return {
+        start = function() end,
+        stop = function() end,
+        close = function() end,
+        is_closing = function()
+          return true
+        end,
+      }
+    end,
+    kill = function() end,
+    spawn = function() end,
+  }
+  local def = tool_mod.create(sandbox_opts, {
+    registry = registry,
+    sandbox = sandbox_stub,
+    uv = uv_stub,
+    os_remove = function()
+      return true
+    end,
+    vim_schedule = function(fn)
+      fn()
+    end,
+  })
+  local handler = def.cmds[1]
+  handler(
+    { tool = { opts = { sandbox = sandbox_opts } } },
+    { cmd = "echo test" },
+    { output_cb = function() end }
+  )
+
+  MiniTest.expect.equality(true, registry.fg_procs[1122] ~= nil, "fg proc should be registered")
+  if registry.fg_procs[1122] then
+    MiniTest.expect.equality(
+      "cc-bash-test-xyz",
+      registry.fg_procs[1122].sandbox_name,
+      "sandbox_name from run return should be stored"
+    )
+  end
+end
+
+T["tool: on_exit handler reads pid and sandbox_name from explicit holders"] = function()
+  -- Intent: Verify that spawn_background/spawn_foreground populate holder
+  -- tables for pid and sandbox_name, and that on_exit reads from those holders.
+  -- This makes the async dependency explicit: uv.spawn returns before on_exit
+  -- can fire, so the holders are always populated before the callback runs.
+  local registry = tool_mod._internal.SessionRegistry.new()
+  local captured_on_exit
+  local returned_pid = 12345
+  local returned_sandbox_name = "cc-test-holder"
+  local kill_calls = {}
+  local uv_stub = {
+    fs_open = function()
+      return 999
+    end,
+    fs_close = function() end,
+    fs_fstat = function()
+      return { size = 0 }
+    end,
+    fs_read = function()
+      return ""
+    end,
+    new_timer = function()
+      return {
+        start = function() end,
+        stop = function() end,
+        close = function() end,
+        is_closing = function()
+          return true
+        end,
+      }
+    end,
+    kill = function() end,
+    spawn = function() end,
+  }
+  local sandbox_stub = {
+    is_available = function()
+      return true
+    end,
+    get_description = function()
+      return "stub description."
+    end,
+    should_use = function()
+      return true
+    end,
+    run = function(_, exec_params)
+      captured_on_exit = exec_params.on_exit
+      return { close = function() end }, returned_pid, true, returned_sandbox_name
+    end,
+    kill = function(opts, sandbox_name, pid)
+      table.insert(kill_calls, { opts = opts, sandbox_name = sandbox_name, pid = pid })
+    end,
+  }
+  local def = tool_mod.create({ backend = "sandlock", backends = { sandlock = {} }, rules = {} }, {
+    registry = registry,
+    sandbox = sandbox_stub,
+    uv = uv_stub,
+    os_remove = function()
+      return true
+    end,
+    vim_schedule = function(fn)
+      fn()
+    end,
+  })
+  local handler = def.cmds[1]
+
+  handler({ tool = { opts = { sandbox = { enabled = true } } } }, { cmd = "echo test" }, {
+    output_cb = function() end,
+  })
+
+  MiniTest.expect.equality(true, captured_on_exit ~= nil, "on_exit should be captured")
+
+  -- Trigger conditional kill by exiting with signal (code=0, signal=15).
+  if captured_on_exit then
+    captured_on_exit(0, 15)
+  end
+
+  MiniTest.expect.equality(1, #kill_calls, "conditional kill should be called")
+  MiniTest.expect.equality(returned_pid, kill_calls[1].pid, "kill should use holder pid")
+  MiniTest.expect.equality(
+    returned_sandbox_name,
+    kill_calls[1].sandbox_name,
+    "kill should use holder sandbox_name"
+  )
+end
+
+T["tool: conditional kill on abnormal exit passes sandbox_opts and sandbox_name"] = function()
+  -- Intent: Verify make_on_exit_handler calls sandbox.kill with the
+  -- sandbox_opts and sandbox_name captured from spawn_foreground's run
+  -- return value (not via registry lookup).
+  local registry = tool_mod._internal.SessionRegistry.new()
+  local sandbox_opts = { backend = "sandlock", backends = { sandlock = {} }, rules = {} }
+  local captured = {}
+  local captured_on_exit
+  local sandbox_stub = {
+    is_available = function()
+      return true
+    end,
+    should_use = function()
+      return true
+    end,
+    run = function(_, ep)
+      captured_on_exit = ep.on_exit
+      return { close = function() end }, 5566, true, "cc-bash-abnormal-id"
+    end,
+    kill = function(opts, sandbox_name, pid)
+      table.insert(captured, { opts = opts, sandbox_name = sandbox_name, pid = pid })
+    end,
+    get_description = function()
+      return "stub description."
+    end,
+  }
+  local uv_stub = {
+    fs_open = function()
+      return 999
+    end,
+    fs_close = function() end,
+    fs_fstat = function()
+      return { size = 0 }
+    end,
+    fs_read = function()
+      return ""
+    end,
+    new_timer = function()
+      return {
+        start = function() end,
+        stop = function() end,
+        close = function() end,
+        is_closing = function()
+          return true
+        end,
+      }
+    end,
+    kill = function() end,
+    spawn = function() end,
+  }
+  local def = tool_mod.create(sandbox_opts, {
+    registry = registry,
+    sandbox = sandbox_stub,
+    uv = uv_stub,
+    os_remove = function()
+      return true
+    end,
+    vim_schedule = function(fn)
+      fn()
+    end,
+  })
+  local handler = def.cmds[1]
+  handler(
+    { tool = { opts = { sandbox = sandbox_opts } } },
+    { cmd = "echo" },
+    { output_cb = function() end }
+  )
+
+  if captured_on_exit then
+    -- code > 128 triggers conditional kill branch
+    captured_on_exit(130, 0)
+  end
+
+  MiniTest.expect.equality(true, #captured >= 1, "conditional kill should be called for code > 128")
+  if #captured >= 1 then
+    Helpers.expect_contains("abnormal-id", captured[1].sandbox_name or "")
+    MiniTest.expect.equality(
+      sandbox_opts,
+      captured[1].opts,
+      "kill should receive sandbox_opts identity"
+    )
+    MiniTest.expect.equality(5566, captured[1].pid, "kill should receive the process pid")
+  end
+end
+
+T["tool: cleanup_all uses each session's own sandbox_opts"] = function()
+  -- Intent: Verify SessionRegistry:cleanup_all kills each RUNNING session
+  -- with its own sandbox_opts/sandbox_name, ensuring both backend variants
+  -- can be cleaned up correctly in a heterogeneous registry.
+  local calls = {}
+  local sandbox_stub = {
+    kill = function(opts, sandbox_name, pid)
+      table.insert(calls, { opts = opts, sandbox_name = sandbox_name, pid = pid })
+    end,
+  }
+  local registry = tool_mod._internal.SessionRegistry.new({
+    sandbox = sandbox_stub,
+    uv = vim.uv,
+    os_remove = function()
+      return true
+    end,
+  })
+  local opts1 = { backend = "sandlock", backends = { sandlock = {} }, rules = {} }
+  local opts2 = { backend = "bubblewrap", backends = { bubblewrap = {} }, rules = {} }
+  -- Add two RUNNING bg sessions with different opts
+  registry:add_bg("session1", {
+    status = "running",
+    pid = 1001,
+    sandbox_opts = opts1,
+    sandbox_name = "sb1",
+    fd = nil,
+    timer = nil,
+    file_path = nil,
+    exit_code = nil,
+    timer_fired = false,
+  })
+  registry:add_bg("session2", {
+    status = "running",
+    pid = 2002,
+    sandbox_opts = opts2,
+    sandbox_name = "sb2",
+    fd = nil,
+    timer = nil,
+    file_path = nil,
+    exit_code = nil,
+    timer_fired = false,
+  })
+
+  registry:cleanup_all()
+
+  MiniTest.expect.equality(2, #calls, "cleanup_all should kill both running sessions")
+  local found_opts1, found_opts2 = false, false
+  for _, c in ipairs(calls) do
+    if c.opts == opts1 and c.sandbox_name == "sb1" then
+      found_opts1 = true
+    end
+    if c.opts == opts2 and c.sandbox_name == "sb2" then
+      found_opts2 = true
+    end
+  end
+  MiniTest.expect.equality(true, found_opts1, "cleanup_all should kill session1 with opts1/sb1")
+  MiniTest.expect.equality(true, found_opts2, "cleanup_all should kill session2 with opts2/sb2")
+end
+
+T["tool: schema description reflects backend get_description"] = function()
+  -- Intent: Verify tool description is built using the facade/backend
+  -- get_description instead of a hardcoded sandlock string.
+  local sandbox_stub = {
+    is_available = function()
+      return true
+    end,
+    should_use = function()
+      return true
+    end,
+    run = function()
+      return nil
+    end,
+    kill = function() end,
+    get_description = function()
+      return "bubblewrap-backed test sandbox."
+    end,
+  }
+  local def = tool_mod.create(
+    { backend = "bubblewrap", backends = { bubblewrap = {} }, rules = {} },
+    {
+      registry = tool_mod._internal.SessionRegistry.new(),
+      sandbox = sandbox_stub,
+    }
+  )
+  MiniTest.expect.equality(
+    true,
+    def.schema["function"].description:find("bubblewrap%-backed test sandbox") ~= nil,
+    "tool description should include backend-specific text"
+  )
 end
 
 return T

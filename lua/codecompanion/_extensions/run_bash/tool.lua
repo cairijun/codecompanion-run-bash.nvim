@@ -2,7 +2,7 @@
 ---
 --- Tool definition for run_bash CodeCompanion extension.
 --- Generates schema, cmds handler, and output handlers.
---- Delegates execution to sandbox.lua and uses checker.lua for approval.
+--- Delegates execution to sandbox/init.lua and uses checker.lua for approval.
 
 local uv = vim.uv
 local sandbox = require("codecompanion._extensions.run_bash.sandbox")
@@ -106,7 +106,7 @@ end
 function SessionRegistry:cleanup_all()
   for _, session in pairs(self.bg_sessions) do
     if session.status == STATUS_RUNNING then
-      self._deps.sandbox.kill(session.sandbox_name, session.pid)
+      self._deps.sandbox.kill(session.sandbox_opts, session.sandbox_name, session.pid)
     end
     if session.fd then
       pcall(self._deps.uv.fs_close, session.fd)
@@ -114,7 +114,7 @@ function SessionRegistry:cleanup_all()
     close_timer(session.timer)
   end
   for pid, info in pairs(self.fg_procs) do
-    self._deps.sandbox.kill(info.sandbox_name, pid)
+    self._deps.sandbox.kill(info.sandbox_opts, info.sandbox_name, pid)
     if info.fd then
       pcall(self._deps.uv.fs_close, info.fd)
     end
@@ -189,12 +189,14 @@ function M.create(sandbox_opts, deps)
   ---Conditional kill, fd close, async output read, and cleanup
   ---are handled here, branching on params.is_bg for mode-specific logic.
   ---@param params table { sandbox_name, fd, file_path, is_bg, session_id,
-  ---  sandbox_used, timer?, kill_timer?, timed_out?, output_cb?, pid? }
-  ---  params.pid is set after uv.spawn returns.
+  ---  sandbox_used, timer?, kill_timer?, timed_out?, output_cb?, pid_holder }
+  ---  pid_holder[1] is populated after sandbox.run() returns. Real libuv
+  ---  always invokes on_exit asynchronously, so the holder is set before
+  ---  the callback can read it.
   ---@return function on_exit
   local function make_on_exit_handler(params)
     return function(code, signal)
-      local pid = params.pid
+      local pid = params.pid_holder[1]
 
       -- Background: skip if session was already killed by handle_kill
       if params.is_bg then
@@ -206,7 +208,7 @@ function M.create(sandbox_opts, deps)
 
       -- Conditional kill on abnormal exit
       if (signal and signal ~= 0) or code > 128 then
-        deps.sandbox.kill(params.sandbox_name, pid)
+        deps.sandbox.kill(params.sandbox_opts, params.sandbox_name_holder[1], pid)
       end
       pcall(deps.uv.fs_close, params.fd)
 
@@ -290,7 +292,7 @@ function M.create(sandbox_opts, deps)
     local file_path = session.file_path
     session.status = STATUS_KILLED
     deps.registry:remove_bg(session_id)
-    deps.sandbox.kill(session.sandbox_name, pid, function()
+    deps.sandbox.kill(session.sandbox_opts, session.sandbox_name, pid, function()
       deps.vim_schedule(function()
         opts.output_cb({
           status = "success",
@@ -305,67 +307,109 @@ function M.create(sandbox_opts, deps)
     end)
   end
 
+  ---Shared spawn setup for foreground and background modes.
+  ---Determines sandbox use, opens temp file, builds on_exit holder-based
+  ---closure, spawns via sandbox.run, and returns either a populated result
+  ---table or nil + error. Callers handle mode-specific timer/registration.
+  ---@param sandbox_opts table|nil Runtime sandbox config
+  ---@param args table Tool args
+  ---@param opts table Output opts
+  ---@param mode_extra table|nil Mode-specific data forwarded into result
+  ---@return table|nil result
+  ---@return string|nil err
+  local function spawn_common(sandbox_opts, args, opts, mode_extra)
+    local use_sandbox = deps.sandbox.should_use(args, sandbox_opts)
+    local file_path = vim.fn.tempname()
+
+    local fd = deps.uv.fs_open(file_path, "w", 384)
+    if not fd then
+      return nil, "fs_open failed: " .. file_path
+    end
+
+    -- Holders make the async coupling explicit: on_exit is created before
+    -- sandbox.run returns, but libuv never fires it synchronously, so the
+    -- values assigned after run() are always available when the callback runs.
+    local pid_holder = {}
+    local sandbox_name_holder = {}
+    local on_exit_params = {
+      sandbox_opts = sandbox_opts,
+      fd = fd,
+      file_path = file_path,
+      sandbox_used = use_sandbox,
+      pid_holder = pid_holder,
+      sandbox_name_holder = sandbox_name_holder,
+    }
+    if mode_extra and mode_extra.session_id then
+      on_exit_params.is_bg = true
+      on_exit_params.session_id = mode_extra.session_id
+    else
+      on_exit_params.is_bg = false
+      on_exit_params.timer = mode_extra and mode_extra.timer
+      on_exit_params.kill_timer = nil
+      on_exit_params.timed_out = mode_extra and mode_extra.timed_out
+      on_exit_params.output_cb = opts.output_cb
+    end
+    local on_exit = make_on_exit_handler(on_exit_params)
+
+    local handle, pid_or_err, sandbox_used, sandbox_name = deps.sandbox.run(sandbox_opts, {
+      cmd = args.cmd,
+      fd = fd,
+      file_path = file_path,
+      use_sandbox = use_sandbox,
+      on_exit = on_exit,
+    })
+    pid_holder[1] = pid_or_err
+    sandbox_name_holder[1] = sandbox_name
+
+    if not handle then
+      pcall(deps.uv.fs_close, fd)
+      if mode_extra and mode_extra.timer then
+        close_timer(mode_extra.timer)
+      end
+      return nil, "spawn failed: " .. tostring(pid_or_err)
+    end
+
+    return {
+      handle = handle,
+      pid = pid_or_err,
+      sandbox_used = sandbox_used,
+      sandbox_name = sandbox_name,
+      fd = fd,
+      file_path = file_path,
+      use_sandbox = use_sandbox,
+    },
+      nil
+  end
+
   ---Spawn a command in background mode.
   ---@param sandbox_opts table|nil Runtime sandbox config
   ---@param args table Tool args
   ---@param tools table Tools object
   ---@param opts table Output opts
   local function spawn_background(sandbox_opts, args, tools, opts)
-    local use_sandbox = deps.sandbox.should_use(args, sandbox_opts)
     local session_id = deps.registry:gen_session_id()
-    local file_path = vim.fn.tempname()
-    local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
     local bg_after = tonumber(args.bg_after) or 0
 
-    local fd = deps.uv.fs_open(file_path, "w", 384)
-    if not fd then
+    local result, err = spawn_common(sandbox_opts, args, opts, { session_id = session_id })
+    if not result then
       opts.output_cb({
         status = "error",
-        data = { output = "fs_open failed: " .. file_path },
-      })
-      return
-    end
-
-    local on_exit_params = {
-      sandbox_name = sandbox_name,
-      fd = fd,
-      file_path = file_path,
-      is_bg = true,
-      session_id = session_id,
-      sandbox_used = use_sandbox,
-    }
-    local on_exit = make_on_exit_handler(on_exit_params)
-
-    local handle, pid_or_err, sandbox_used
-    handle, pid_or_err, sandbox_used = deps.sandbox.run(sandbox_opts, {
-      cmd = args.cmd,
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = use_sandbox,
-      sandbox_name = sandbox_name,
-      on_exit = on_exit,
-    })
-    on_exit_params.pid = pid_or_err
-
-    if not handle then
-      pcall(deps.uv.fs_close, fd)
-      opts.output_cb({
-        status = "error",
-        data = { output = "spawn failed: " .. tostring(pid_or_err) },
+        data = { output = err },
       })
       return
     end
 
     deps.registry:add_bg(session_id, {
-      pid = pid_or_err,
-      handle = handle,
-      fd = fd,
-      file_path = file_path,
+      pid = result.pid,
+      handle = result.handle,
+      fd = result.fd,
+      file_path = result.file_path,
       status = STATUS_RUNNING,
       exit_code = nil,
       timer = nil,
       timer_fired = false,
-      sandbox_name = sandbox_name,
+      sandbox_name = result.sandbox_name,
+      sandbox_opts = sandbox_opts,
     })
 
     local timer = deps.uv.new_timer()
@@ -395,7 +439,7 @@ function M.create(sandbox_opts, deps)
                 bg_exited = true,
                 session_id = session_id,
                 file_path = fp,
-                sandbox_active = sandbox_used,
+                sandbox_active = result.sandbox_used,
               },
             })
           end)
@@ -411,8 +455,8 @@ function M.create(sandbox_opts, deps)
                 session_id = session_id,
                 file_path = session.file_path,
                 bg_running = true,
-                pid = pid_or_err,
-                sandbox_active = sandbox_used,
+                pid = result.pid,
+                sandbox_active = result.sandbox_used,
               },
             })
           end)
@@ -427,79 +471,47 @@ function M.create(sandbox_opts, deps)
   ---@param tools table Tools object
   ---@param opts table Output opts
   local function spawn_foreground(sandbox_opts, args, tools, opts)
-    local use_sandbox = deps.sandbox.should_use(args, sandbox_opts)
-    local session_id = deps.registry:gen_session_id()
-    local file_path = vim.fn.tempname()
-    local sandbox_name = use_sandbox and ("cc-bash-" .. session_id) or nil
     local timeout = tonumber(args.timeout) or DEFAULT_TIMEOUT
     local timeout_ms = timeout * 1000
-
-    local fd = deps.uv.fs_open(file_path, "w", 384)
-    if not fd then
-      opts.output_cb({
-        status = "error",
-        data = { output = "fs_open failed: " .. file_path },
-      })
-      return
-    end
 
     local timed_out = { value = false }
     local timer = deps.uv.new_timer()
 
-    local on_exit_params = {
-      sandbox_name = sandbox_name,
-      fd = fd,
-      file_path = file_path,
-      is_bg = false,
-      sandbox_used = use_sandbox,
-      timer = timer,
-      kill_timer = nil,
-      timed_out = timed_out,
-      output_cb = opts.output_cb,
-    }
-    local on_exit = make_on_exit_handler(on_exit_params)
-
-    local handle, pid_or_err, sandbox_used
-    handle, pid_or_err, sandbox_used = deps.sandbox.run(sandbox_opts, {
-      cmd = args.cmd,
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = use_sandbox,
-      sandbox_name = sandbox_name,
-      on_exit = on_exit,
-    })
-    on_exit_params.pid = pid_or_err
-
-    if not handle then
+    local result, err =
+      spawn_common(sandbox_opts, args, opts, { timer = timer, timed_out = timed_out })
+    if not result then
       close_timer(timer)
-      pcall(deps.uv.fs_close, fd)
-      pcall(deps.os_remove, file_path)
       opts.output_cb({
         status = "error",
-        data = { output = "spawn failed: " .. tostring(pid_or_err) },
+        data = { output = err },
       })
       return
     end
 
-    deps.registry:add_fg(
-      pid_or_err,
-      { file_path = file_path, fd = fd, sandbox_name = sandbox_name }
-    )
+    deps.registry:add_fg(result.pid, {
+      file_path = result.file_path,
+      fd = result.fd,
+      sandbox_name = result.sandbox_name,
+      sandbox_opts = sandbox_opts,
+    })
 
     timer:start(timeout_ms, 0, function()
       timed_out.value = true
       -- Delegate kill to sandbox layer for both sandbox and non-sandbox paths,
       -- keeping two-stage termination logic in one place.
-      deps.sandbox.kill(sandbox_name, pid_or_err)
+      deps.sandbox.kill(sandbox_opts, result.sandbox_name, result.pid)
     end)
   end
 
   local sandbox_available = deps.sandbox.is_available(sandbox_opts)
 
-  -- ── Dynamic tool description ─────────────────────────────────────────
+  -- ── Dynamic tool description ─────────────────────────────────────
+  -- First paragraph adapted from backend's description, rest static.
   local tool_desc
   if sandbox_available then
-    tool_desc = [[Runs bash commands. Sandboxed by default (sandlock: Landlock + seccomp).
+    tool_desc = "Runs bash commands. "
+      .. deps.sandbox.get_description(sandbox_opts)
+      .. [[
 
 Sandbox mode (default): auto-approved unless the command matches a pause list rule (git reset --hard, npm publish, etc.). Pause-listed commands require user approval.
 - Sandbox may block access outside allowed file paths / network targets or dangerous syscalls.
