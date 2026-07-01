@@ -69,11 +69,20 @@ jobs:
           install -m 755 sandlock ~/.local/bin/sandlock
           rm -f sandlock-x86_64-unknown-linux-gnu.tar.gz sandlock
 
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Deps check
         run: |
           echo "=== sandlock ==="
           sandlock --version
           sandlock check
+          echo "=== bubblewrap ==="
+          bwrap --version
+          bwrap --ro-bind / / echo "bubblewrap ok"
           echo "=== nvim ==="
           nvim -V1 -v
           nvim --headless --noplugin -u ./tests/minimal_init.lua -c 'checkhealth' -c 'w /tmp/nvim_checkhealth.txt' -c 'qall!'
