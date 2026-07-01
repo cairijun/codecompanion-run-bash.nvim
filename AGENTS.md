@@ -71,7 +71,8 @@ Test layers:
 - **Unit — resolver** (`tests/units/test_resolver.lua`): Path resolution, XDG fallbacks, `resolve_fs_rules` grouping/dedup/existence checks. Tests `sandbox/resolver.lua` in isolation.
 - **Unit — sandlock backend** (`tests/units/test_backend_sandlock.lua`): CLI args, availability, validate_opts, run/kill spies. Tests `sandbox/backends/sandlock.lua` in isolation.
 - **Unit — bubblewrap backend** (`tests/units/test_backend_bubblewrap.lua`): Bind/connect args mapping, fs_denied dir-vs-file-skip, uid_map availability, two-stage kill. Tests `sandbox/backends/bubblewrap.lua` in isolation.
-- **Unit — sandbox facade** (`tests/units/test_sandbox.lua`): Facade dispatch by `opts.backend`, unknown backend error, `run()` 4th return `sandbox_name`, non-sandbox two-stage kill, end-to-end sandlock exec/kill (skipped if sandlock missing). Tests `sandbox/init.lua` (the facade).
+- **Unit — sandbox facade** (`tests/units/test_sandbox.lua`): Facade dispatch by `opts.backend`, unknown backend error, `run()` return shape, defaults, and non-sandbox two-stage kill. Tests `sandbox/init.lua` without real backends.
+- **Unit — sandbox backends matrix** (`tests/units/test_sandbox_backends.lua`): Common backend contract (execution, capture, exit codes, isolation, kill) against `sandlock`, `bubblewrap`, and the non-sandbox `none` driver.
 - **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, registry persistence of `sandbox_opts`/`sandbox_name`, kill opts dispatch, cleanup_all per-entry, dynamic description, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox` facade.
 - **Unit — init** (`tests/units/test_init.lua`): Config merge, default `backend="sandlock"`, legacy→new migration, `validate_backend_opts`, requirement of approval flow. Tests `init.setup()` in isolation.
 - **Integration** (`tests/test_integration.lua`): Full `Chat → run_bash → sandbox → command` pipeline. Only the LLM Adapter is mocked. Tests the contract between run_bash and CodeCompanion — tool registration, approval flow, execution, output formatting — all through the Chat interface, not direct handler calls.
@@ -91,4 +92,5 @@ Test layers:
 When using `run_bash` to run tests: `run_bash` sandbox enabled by default — sandlock can't nest. Two ways:
 
 - `"skip_sandbox": true` — test outside of sandbox (no nesting conflict).
-- `SKIP_SANDBOX_TESTS=1` — skip sandbox tests entirely, test non-sandbox code only. DON'T when full tests needed.
+- `TEST_CC_RUN_BASH_SANDBOX_BACKENDS=""` — skip all backend-gated tests (the `none` baseline is also skipped). Use when running tests inside a nested sandbox or when backends are missing. DON'T when full backend coverage is needed.
+- `TEST_CC_RUN_BASH_SANDBOX_BACKENDS="sandlock"` — run only the sandlock row of the backend matrix.

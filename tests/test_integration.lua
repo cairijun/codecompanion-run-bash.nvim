@@ -272,7 +272,9 @@ end
 T["integration: pause-listed command always accept cached on second call"] = function()
   -- Intent: Verify that "Always accept" caches the approval decision:
   -- the mock approval is called only once across two tool calls.
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
   local child = MiniTest.new_child_neovim()
   Helpers.child_start(child)
   Helpers.mock_approval_prompt(child)
@@ -322,7 +324,9 @@ end
 T["integration: write to denied path blocked by sandbox"] = function()
   -- Intent: Verify that writing to a path denied by the sandlock profile
   -- produces a permission error with sandbox active in the output.
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
   local test_dir = "/tmp/cc-run-bash-test-deny"
   vim.fn.mkdir(test_dir, "p")
   local child = MiniTest.new_child_neovim()

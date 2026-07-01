@@ -1423,7 +1423,9 @@ T["tool: create returns valid tool definition"] = function()
 end
 
 T["tool: schema includes skip_sandbox when sandbox available"] = function()
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
 
   local def = tool_mod.create({
     backend = "sandlock",

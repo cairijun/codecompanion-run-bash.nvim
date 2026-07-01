@@ -14,6 +14,13 @@ local T = MiniTest.new_set()
 
 local function no_op() end
 
+-- Rules sufficient to run /bin/bash and its shared libraries inside bwrap.
+local common_rules = {
+  writable = { vim.fn.getcwd(), "/tmp" },
+  readable = { vim.fn.getcwd(), "/usr", "/bin", "/lib", "/lib64" },
+  denied = {},
+}
+
 -- ── _build_args tests ────────────────────────────────────────────
 
 T["build_args: writable produces --bind SRC SRC"] = function()
@@ -182,6 +189,9 @@ end
 -- ── is_available tests ────────────────────────────────────────────
 
 T["is_available: true when bwrap installed and uid_map has valid mapping"] = function()
+  if not Helpers.should_test_backend("bubblewrap") then
+    MiniTest.skip("bubblewrap not selected")
+  end
   -- Skip if bwrap is not installed on the host
   if vim.fn.executable("bwrap") ~= 1 then
     MiniTest.skip("bwrap not installed")
@@ -294,6 +304,9 @@ T["run: spawns bwrap with args, returns true used and nil sandbox_name"] = funct
 end
 
 local function require_bubblewrap()
+  if not Helpers.should_test_backend("bubblewrap") then
+    MiniTest.skip("bubblewrap not selected")
+  end
   if vim.fn.executable("bwrap") ~= 1 then
     MiniTest.skip("bwrap not installed")
   end
@@ -320,7 +333,7 @@ T["kill: real bwrap two-stage kill terminates process"] = function()
     on_exit = function()
       done = true
     end,
-    resolved_rules = { writable = { "/tmp" }, readable = { "/usr" }, denied = {} },
+    resolved_rules = common_rules,
   })
 
   if handle then
@@ -329,7 +342,7 @@ T["kill: real bwrap two-stage kill terminates process"] = function()
 
   vim.wait(500, function()
     return false
-  end)
+  end, 50, true)
 
   backend.kill({}, nil, pid, function()
     kill_callback_fired = true
@@ -337,7 +350,7 @@ T["kill: real bwrap two-stage kill terminates process"] = function()
 
   local ok = vim.wait(5000, function()
     return done and kill_callback_fired
-  end, 50)
+  end, 50, true)
   pcall(uv.fs_close, fd)
   pcall(os.remove, file_path)
 
@@ -361,7 +374,7 @@ T["run: real bwrap executes echo"] = function()
       exit_code = code
       done = true
     end,
-    resolved_rules = { writable = { "/tmp" }, readable = { "/usr" }, denied = {} },
+    resolved_rules = common_rules,
   })
 
   if handle then
@@ -370,7 +383,7 @@ T["run: real bwrap executes echo"] = function()
 
   local ok = vim.wait(5000, function()
     return done
-  end, 50)
+  end, 50, true)
   pcall(uv.fs_close, fd)
   local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
   pcall(os.remove, file_path)

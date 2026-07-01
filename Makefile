@@ -37,7 +37,7 @@ all: test
 # Run all tests
 test: $(COMMIT_MARKER)
 	@echo "Running tests..."
-	$(NVIM) --headless --noplugin -u ./tests/minimal_init.lua -c "lua MiniTest.run()" -c "qa!"
+	$(NVIM) --headless --noplugin -u ./tests/minimal_init.lua -c "lua MiniTest.run()"
 
 # Run a specific test file
 test_file: $(COMMIT_MARKER)
@@ -45,7 +45,7 @@ ifndef FILE
 	$(error FILE is required. Usage: make test_file FILE=tests/units/test_checker.lua)
 endif
 	@echo "Testing file: $(FILE)"
-	$(NVIM) --headless --noplugin -u ./tests/minimal_init.lua -c "lua MiniTest.run_file('$(FILE)')" -c "qa!"
+	$(NVIM) --headless --noplugin -u ./tests/minimal_init.lua -c "lua MiniTest.run_file('$(FILE)')"
 
 # ============================================================
 # Dependency Installation

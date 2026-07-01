@@ -11,6 +11,13 @@ local backend = require("codecompanion._extensions.run_bash.sandbox.backends.san
 
 local T = MiniTest.new_set()
 
+-- Rules sufficient to run /bin/bash and its shared libraries inside sandlock.
+local common_rules = {
+  writable = { vim.fn.getcwd(), "/tmp" },
+  readable = { vim.fn.getcwd(), "/usr", "/bin", "/lib", "/lib64" },
+  denied = {},
+}
+
 local function truthy_fs()
   return {}
 end
@@ -91,7 +98,9 @@ end
 -- ── is_available tests ───────────────────────────────────────────
 
 T["is_available: true when sandlock and profile present"] = function()
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
   MiniTest.expect.equality(true, backend.is_available({ profile = Helpers.sandbox_profile_path() }))
 end
 
@@ -175,7 +184,9 @@ T["kill: spawns sandlock kill with sandbox_name"] = function()
 end
 
 T["run: real sandlock executes echo"] = function()
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
 
   local uv = vim.uv
   local file_path = "/tmp/cc-sb-real-run-" .. math.random(10000, 99999) .. ".out"
@@ -184,7 +195,8 @@ T["run: real sandlock executes echo"] = function()
 
   local exit_code = nil
   local done = false
-  local handle, pid, sandbox_used, sandbox_name = backend.run(
+  local sandbox_name = "cc-sb-real-run-" .. math.random(10000, 99999)
+  local handle, pid, sandbox_used, returned_name = backend.run(
     { profile = Helpers.sandbox_profile_path() },
     {
       cmd = "echo hello",
@@ -193,11 +205,8 @@ T["run: real sandlock executes echo"] = function()
         exit_code = code
         done = true
       end,
-      resolved_rules = {
-        writable = { vim.fn.getcwd() },
-        readable = { vim.fn.expand("$HOME") },
-        denied = {},
-      },
+      resolved_rules = common_rules,
+      sandbox_name = sandbox_name,
     }
   )
 
@@ -207,7 +216,7 @@ T["run: real sandlock executes echo"] = function()
 
   local ok = vim.wait(5000, function()
     return done
-  end, 50)
+  end, 50, true)
   pcall(uv.fs_close, fd)
   local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
   pcall(os.remove, file_path)
@@ -216,7 +225,8 @@ T["run: real sandlock executes echo"] = function()
   MiniTest.expect.equality(true, handle ~= nil)
   MiniTest.expect.equality("number", type(pid))
   MiniTest.expect.equality(true, sandbox_used)
-  MiniTest.expect.equality("string", type(sandbox_name))
+  MiniTest.expect.equality("string", type(returned_name))
+  MiniTest.expect.equality(sandbox_name, returned_name)
   if exit_code ~= nil then
     MiniTest.expect.equality(0, exit_code)
   end
@@ -224,7 +234,9 @@ T["run: real sandlock executes echo"] = function()
 end
 
 T["kill: real sandlock kill terminates sandbox"] = function()
-  Helpers.require_sandbox()
+  if not Helpers.should_test_backend("sandlock") then
+    MiniTest.skip("sandlock not selected")
+  end
 
   local uv = vim.uv
   local file_path = "/tmp/cc-sb-real-kill-" .. math.random(10000, 99999) .. ".out"
@@ -233,21 +245,16 @@ T["kill: real sandlock kill terminates sandbox"] = function()
 
   local done = false
   local kill_callback_fired = false
-  local handle, pid, _sandbox_used, sandbox_name = backend.run(
-    { profile = Helpers.sandbox_profile_path() },
-    {
-      cmd = "sleep 30",
-      fd = fd,
-      on_exit = function()
-        done = true
-      end,
-      resolved_rules = {
-        writable = { vim.fn.getcwd() },
-        readable = { vim.fn.expand("$HOME") },
-        denied = {},
-      },
-    }
-  )
+  local sandbox_name = "cc-sb-real-kill-" .. math.random(10000, 99999)
+  local handle, pid = backend.run({ profile = Helpers.sandbox_profile_path() }, {
+    cmd = "sleep 30",
+    fd = fd,
+    on_exit = function()
+      done = true
+    end,
+    resolved_rules = common_rules,
+    sandbox_name = sandbox_name,
+  })
 
   if handle then
     uv.unref(handle)
@@ -255,7 +262,7 @@ T["kill: real sandlock kill terminates sandbox"] = function()
 
   vim.wait(500, function()
     return false
-  end)
+  end, 50, true)
 
   backend.kill({}, sandbox_name, pid, function()
     kill_callback_fired = true
@@ -263,7 +270,7 @@ T["kill: real sandlock kill terminates sandbox"] = function()
 
   local ok = vim.wait(5000, function()
     return done and kill_callback_fired
-  end, 50)
+  end, 50, true)
   pcall(uv.fs_close, fd)
   pcall(os.remove, file_path)
 

@@ -48,6 +48,7 @@ function M._internal.two_stage_kill(pid, on_killed, deps)
 end
 
 ---Known backend names. load_backend errors for anything not in this list.
+-- Keep in sync with the driver list in tests/units/test_sandbox_backends.lua.
 local KNOWN_BACKENDS = { "sandlock", "bubblewrap" }
 
 ---Module-level counter for unique sandbox names within a session.

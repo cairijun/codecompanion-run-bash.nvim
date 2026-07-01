@@ -1,11 +1,10 @@
 --[[
-Test: sandbox/init.lua — Facade & Execution Engine
+Test: sandbox/init.lua — Facade dispatch and defaults
 
 Intent: Verify facade dispatches to correct backend by opts.backend,
 generates sandbox_name as run() 4th return value, validates unknown
-backends, and handles non-sandbox execution (bash direct spawn,
-two-stage SIGTERM → SIGKILL). Sandbox integration tests verify
-end-to-end sandlock execution.
+backends, and handles non-sandbox kill behavior. End-to-end backend
+contract tests live in test_sandbox_backends.lua.
 ]]
 
 local uv = vim.uv
@@ -165,429 +164,198 @@ T["facade: kill dispatches to sandlock backend with opts"] = function()
   MiniTest.expect.equality("test-sb", (captured.args or {})[2])
 end
 
--- ── Non-sandbox mode ──────────────────────────────────────────────
-
-do
-  local sandbox_opts = { backend = false }
-
-  T["non-sandbox: run echo hello"] = function()
-    local file_path = "/tmp/cc-test-hello-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil, "fs_open failed")
-
-    local exit_code = nil
-    local done = false
-
-    local handle, pid, sandbox_used, sandbox_name = sandbox.run(sandbox_opts, {
-      cmd = "echo hello",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = false,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(3000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok, "on_exit should fire within 3s")
-    if exit_code ~= nil then
-      MiniTest.expect.equality(0, exit_code, "exit code should be 0")
-    end
-    Helpers.expect_contains("hello", content)
-    MiniTest.expect.equality(false, sandbox_used, "sandbox should NOT be used")
-    MiniTest.expect.equality(nil, sandbox_name, "sandbox_name should be nil for non-sandbox")
-  end
-
-  T["non-sandbox: run false (exit 1)"] = function()
-    local file_path = "/tmp/cc-test-false-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local exit_code = nil
-    local done = false
-
-    local handle, pid = sandbox.run(sandbox_opts, {
-      cmd = "false",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = false,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(3000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok)
-    MiniTest.expect.equality(1, exit_code or -1)
-  end
-
-  T["non-sandbox: kill sends SIGTERM before SIGKILL and fires callback"] = function()
-    -- Intent: Verify non-sandbox kill uses two-stage SIGTERM → delayed SIGKILL.
-    -- The trap handler proves SIGTERM arrived before SIGKILL;
-    -- SIGKILL alone would kill the process without the trap firing.
-    local file_path = "/tmp/cc-test-kill-seq-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local done = false
-    local callback_fired = false
-
-    local handle, pid = sandbox.run(sandbox_opts, {
-      cmd = "trap 'echo SIGTERM_RECEIVED' TERM; sleep 30",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = false,
-      on_exit = function()
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    -- Give trap time to be set in the child process
-    vim.wait(300, function()
-      return false
-    end)
-
-    sandbox.kill(sandbox_opts, nil, pid, function()
-      callback_fired = true
-    end)
-
-    -- Wait for both process exit and kill callback (SIGTERM + 2s delay + SIGKILL)
-    local ok = vim.wait(5000, function()
-      return done and callback_fired
-    end, 50)
-    pcall(uv.fs_close, fd)
-    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok, "process should die and callback should fire")
-    Helpers.expect_contains("SIGTERM_RECEIVED", content)
-  end
-
-  T["non-sandbox: kill without callback does not error"] = function()
-    local ok, err = pcall(sandbox.kill, sandbox_opts, nil, 99999)
-    MiniTest.expect.equality(true, ok, "kill without callback should not error: " .. tostring(err))
-  end
-
-  T["non-sandbox: output interleaving"] = function()
-    local file_path = "/tmp/cc-test-interleave-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local done = false
-
-    local handle, pid = sandbox.run(sandbox_opts, {
-      cmd = "echo out1; echo err1 >&2; echo out2",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = false,
-      on_exit = function(code)
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(3000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok)
-    Helpers.expect_contains("out1", content)
-    Helpers.expect_contains("err1", content)
-    Helpers.expect_contains("out2", content)
-  end
+T["facade: should_use true when backend available"] = function()
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
+    is_available = function()
+      return true
+    end,
+    capabilities = function() end,
+    run = function() end,
+    kill = function() end,
+    validate_opts = function() end,
+    get_description = function() end,
+  }
+  local result = sandbox.should_use({ skip_sandbox = false }, { backend = "bubblewrap" })
+  MiniTest.expect.equality(true, result)
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
 end
 
--- ── Sandbox mode (skip if sandlock unavailable) ──────────────────
+T["facade: is_available dispatches to backend"] = function()
+  local called = false
+  local backend = {
+    is_available = function(opts)
+      called = true
+      return opts.ready
+    end,
+    capabilities = function() end,
+    run = function() end,
+    kill = function() end,
+    validate_opts = function() end,
+    get_description = function() end,
+  }
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = backend
+  local result =
+    sandbox.is_available({ backend = "bubblewrap", backends = { bubblewrap = { ready = true } } })
+  MiniTest.expect.equality(true, called)
+  MiniTest.expect.equality(true, result)
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
+end
 
-do
-  local function make_sandbox_opts()
-    return {
-      backend = "sandlock",
-      rules = {
-        fs_writable = { vim.fn.getcwd() },
-        fs_readable = { vim.fn.expand("$HOME") },
-      },
-      backends = {
-        sandlock = {
-          profile = Helpers.sandbox_profile_path(),
-        },
-      },
-    }
+T["facade: get_description dispatches to backend"] = function()
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
+    is_available = function() end,
+    capabilities = function() end,
+    run = function() end,
+    kill = function() end,
+    validate_opts = function() end,
+    get_description = function()
+      return "bw-desc"
+    end,
+  }
+  local desc = sandbox.get_description({ backend = "bubblewrap" })
+  MiniTest.expect.equality("bw-desc", desc)
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
+end
+
+T["facade: validate_backend_opts dispatches to backend"] = function()
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
+    is_available = function() end,
+    capabilities = function() end,
+    run = function() end,
+    kill = function() end,
+    validate_opts = function(opts)
+      return opts.missing and "missing" or nil
+    end,
+    get_description = function() end,
+  }
+  local err = sandbox.validate_backend_opts({
+    backend = "bubblewrap",
+    backends = { bubblewrap = { missing = true } },
+  })
+  MiniTest.expect.equality("missing", err)
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
+end
+
+T["facade: sandboxed run returns nil handle propagates error"] = function()
+  local function spawn_stub(exe, opts, on_exit)
+    return nil, "spawn failed"
   end
+  local function no_op() end
 
-  T["sandbox: is_available true when everything present"] = function()
-    Helpers.require_sandbox()
-    MiniTest.expect.equality(true, sandbox.is_available(make_sandbox_opts()))
+  local handle, err, sandbox_used, sandbox_name = sandbox.run({
+    backend = "sandlock",
+    rules = {},
+    backends = { sandlock = { profile = "/tmp/fake.toml" } },
+  }, {
+    cmd = "echo hi",
+    fd = 3,
+    use_sandbox = true,
+    on_exit = no_op,
+    deps = { spawn = spawn_stub, unref = no_op },
+  })
+
+  MiniTest.expect.equality(nil, handle)
+  MiniTest.expect.equality("spawn failed", err)
+  MiniTest.expect.equality(true, sandbox_used)
+  MiniTest.expect.equality("string", type(sandbox_name))
+end
+
+T["facade: non-sandbox run returns nil handle propagates error"] = function()
+  local function spawn_stub(exe, opts, on_exit)
+    return nil, "no bash"
   end
+  local function no_op() end
 
-  T["sandbox: run echo hello"] = function()
-    Helpers.require_sandbox()
+  local handle, err, sandbox_used, sandbox_name = sandbox.run({ backend = false }, {
+    cmd = "echo hi",
+    fd = 3,
+    use_sandbox = false,
+    on_exit = no_op,
+    deps = { spawn = spawn_stub, unref = no_op },
+  })
 
-    local sb_opts = make_sandbox_opts()
-    local file_path = "/tmp/cc-sb-hello-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
+  MiniTest.expect.equality(nil, handle)
+  MiniTest.expect.equality("no bash", err)
+  MiniTest.expect.equality(false, sandbox_used)
+  MiniTest.expect.equality(nil, sandbox_name)
+end
 
-    local exit_code = nil
-    local done = false
-
-    local handle, pid, sandbox_used, sandbox_name = sandbox.run(sb_opts, {
-      cmd = "echo hello",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok, "on_exit should fire")
-    MiniTest.expect.equality(true, sandbox_used, "sandbox should be used")
-    MiniTest.expect.equality(true, sandbox_name ~= nil, "sandbox_name should be returned")
-    if exit_code ~= nil then
-      MiniTest.expect.equality(0, exit_code)
-    end
-    Helpers.expect_contains("hello", content)
-  end
-
-  T["sandbox: write outside sandbox fails"] = function()
-    Helpers.require_sandbox()
-
-    local sb_opts = make_sandbox_opts()
-    local file_path = "/tmp/cc-sb-ouside-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local exit_code = nil
-    local done = false
-
-    local handle, pid = sandbox.run(sb_opts, {
-      cmd = "touch /etc/cc-test-forbidden 2>&1",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok)
-    -- In sandbox, this should fail (exit code > 128 for signal-based failure)
-    if exit_code ~= nil then
-      MiniTest.expect.equality(true, exit_code ~= 0, "should fail (exit code != 0)")
-    end
-  end
-
-  T["sandbox: read $HOME succeeds"] = function()
-    Helpers.require_sandbox()
-
-    local sb_opts = make_sandbox_opts()
-    local file_path = "/tmp/cc-sb-home-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local exit_code = nil
-    local done = false
-
-    local handle, pid = sandbox.run(sb_opts, {
-      cmd = "cat ~/.profile",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok)
-    if exit_code ~= nil then
-      MiniTest.expect.equality(0, exit_code, "should succeed reading $HOME")
+T["facade: non-sandbox kill dispatches to two_stage_kill"] = function()
+  local called = {}
+  local orig = sandbox._internal.two_stage_kill
+  sandbox._internal.two_stage_kill = function(pid, on_killed, deps)
+    called.pid = pid
+    called.on_killed = on_killed
+    if on_killed then
+      on_killed()
     end
   end
 
-  T["sandbox: write /tmp succeeds"] = function()
-    Helpers.require_sandbox()
+  sandbox.kill({ backend = false }, nil, 12345)
 
-    local sb_opts = make_sandbox_opts()
-    local test_file = "/tmp/cc-sb-write-" .. math.random(10000, 99999) .. ".txt"
-    local file_path = "/tmp/cc-sb-write-out-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
+  sandbox._internal.two_stage_kill = orig
+  MiniTest.expect.equality(12345, called.pid)
+end
 
-    local exit_code = nil
-    local done = false
+T["facade: non-sandbox kill delivers SIGTERM before SIGKILL"] = function()
+  -- Intent: Verify non-sandbox kill uses two-stage SIGTERM → delayed SIGKILL.
+  -- The trap handler proves SIGTERM arrived before SIGKILL;
+  -- SIGKILL alone would kill the process without the trap firing.
+  local file_path = "/tmp/cc-test-kill-seq-" .. math.random(10000, 99999) .. ".out"
+  local fd = uv.fs_open(file_path, "w", 384)
+  MiniTest.expect.equality(true, fd ~= nil)
 
-    local handle, pid = sandbox.run(sb_opts, {
-      cmd = "touch " .. test_file,
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        exit_code = code
-        done = true
-      end,
-    })
+  local done = false
+  local callback_fired = false
 
-    if handle then
-      uv.unref(handle)
-    end
+  local handle, pid = sandbox.run({ backend = false }, {
+    cmd = "trap 'echo SIGTERM_RECEIVED' TERM; sleep 30",
+    fd = fd,
+    file_path = file_path,
+    use_sandbox = false,
+    on_exit = function()
+      done = true
+    end,
+  })
 
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-    pcall(os.remove, test_file)
-
-    MiniTest.expect.equality(true, ok)
-    if exit_code ~= nil then
-      MiniTest.expect.equality(0, exit_code, "should succeed writing /tmp")
-    end
+  if handle then
+    uv.unref(handle)
   end
 
-  T["sandbox: kill running process"] = function()
-    Helpers.require_sandbox()
+  -- Give trap time to be set in the child process
+  vim.wait(300, function()
+    return false
+  end, 50, true)
 
-    local sb_opts = make_sandbox_opts()
-    local file_path = "/tmp/cc-sb-kill-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
+  sandbox.kill({ backend = false }, nil, pid, function()
+    callback_fired = true
+  end)
 
-    local done = false
+  -- Wait for both process exit and kill callback (SIGTERM + 2s delay + SIGKILL)
+  local ok = vim.wait(5000, function()
+    return done and callback_fired
+  end, 50, true)
+  pcall(uv.fs_close, fd)
+  local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
+  pcall(os.remove, file_path)
 
-    local handle, pid, _, sb_name = sandbox.run(sb_opts, {
-      cmd = "sleep 30",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        done = true
-      end,
-    })
+  MiniTest.expect.equality(true, ok, "process should die and callback should fire")
+  Helpers.expect_contains("SIGTERM_RECEIVED", content)
+end
 
-    if handle then
-      uv.unref(handle)
-    end
+T["facade: defaults has expected backends and rules"] = function()
+  local defaults = sandbox.defaults
+  MiniTest.expect.equality("sandlock", defaults.backend)
+  MiniTest.expect.equality("table", type(defaults.rules.fs_readable))
+  MiniTest.expect.equality("table", type(defaults.rules.fs_writable))
+  MiniTest.expect.equality("table", type(defaults.rules.fs_denied))
+  MiniTest.expect.equality("table", type(defaults.backends.sandlock))
+  MiniTest.expect.equality("table", type(defaults.backends.bubblewrap))
+end
 
-    -- Give process time to start
-    vim.wait(500, function()
-      return false
-    end)
-
-    -- Kill via facade, passing sandbox_opts and sandbox_name from run return
-    sandbox.kill(sb_opts, sb_name, pid)
-
-    -- Wait for on_exit to fire
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok, "on_exit should fire after sandbox kill")
-  end
-
-  T["sandbox: output interleaving"] = function()
-    Helpers.require_sandbox()
-
-    local sb_opts = make_sandbox_opts()
-    local file_path = "/tmp/cc-sb-interleave-" .. math.random(10000, 99999) .. ".out"
-    local fd = uv.fs_open(file_path, "w", 420)
-    MiniTest.expect.equality(true, fd ~= nil)
-
-    local done = false
-
-    local handle, pid = sandbox.run(sb_opts, {
-      cmd = "echo out1; echo err1 >&2; echo out2",
-      fd = fd,
-      file_path = file_path,
-      use_sandbox = true,
-      on_exit = function(code)
-        done = true
-      end,
-    })
-
-    if handle then
-      uv.unref(handle)
-    end
-
-    local ok = vim.wait(5000, function()
-      return done
-    end, 50)
-    pcall(uv.fs_close, fd)
-    local content = (uv.fs_stat(file_path) and io.open(file_path, "r"):read("*a")) or ""
-    pcall(os.remove, file_path)
-
-    MiniTest.expect.equality(true, ok)
-    Helpers.expect_contains("out1", content)
-    Helpers.expect_contains("err1", content)
-    Helpers.expect_contains("out2", content)
-  end
+T["non-sandbox: kill without callback does not error"] = function()
+  local ok, err = pcall(sandbox.kill, { backend = false }, nil, 99999)
+  MiniTest.expect.equality(true, ok, "kill without callback should not error: " .. tostring(err))
 end
 
 return T

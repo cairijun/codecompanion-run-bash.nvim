@@ -294,18 +294,24 @@ function Helpers.unwrap_cb_data(output_data)
   return output_data.data and output_data.data[1] or output_data.data or output_data
 end
 
----Require sandbox environment for test.
----When SKIP_SANDBOX_TESTS=1, always skip. Otherwise enforce availability.
-function Helpers.require_sandbox()
-  if os.getenv("SKIP_SANDBOX_TESTS") == "1" then
-    MiniTest.skip("SKIP_SANDBOX_TESTS is set")
-    return
+---Return true if the named sandbox backend should be tested under the current env-var filter.
+---Unset TEST_CC_RUN_BASH_SANDBOX_BACKENDS means all backends; empty means none.
+---@param name string Backend name ("sandlock", "bubblewrap", "none", etc.)
+---@return boolean
+function Helpers.should_test_backend(name)
+  local value = os.getenv("TEST_CC_RUN_BASH_SANDBOX_BACKENDS")
+  if value == nil then
+    return true
   end
-  if
-    vim.fn.executable("sandlock") ~= 1 or vim.uv.fs_stat(Helpers.sandbox_profile_path()) == nil
-  then
-    error("sandlock or profile not available; set SKIP_SANDBOX_TESTS=1 to skip sandbox tests")
+  if value == "" then
+    return false
   end
+  for part in string.gmatch(value, "[^,]+") do
+    if vim.trim(part) == name then
+      return true
+    end
+  end
+  return false
 end
 
 ---Replace interactive approval prompt UI with a programmable mock
@@ -455,12 +461,12 @@ end
 ---@param opts.timeout? number Wait timeout in ms (default 5000)
 function Helpers.run_simple_chat_test(opts)
   local sandbox_opts = opts.sandbox_opts or {}
-  if
-    sandbox_opts.sandbox
-    and sandbox_opts.sandbox.backend ~= false
-    and sandbox_opts.sandbox.backend ~= nil
-  then
-    Helpers.require_sandbox()
+  local sandbox_cfg = opts.sandbox_opts and opts.sandbox_opts.sandbox or {}
+  local backend_name = sandbox_cfg.backend
+  if backend_name ~= false and backend_name ~= nil then
+    if not Helpers.should_test_backend(backend_name or "sandlock") then
+      MiniTest.skip((backend_name or "sandlock") .. " not selected")
+    end
   end
 
   local child = MiniTest.new_child_neovim()
