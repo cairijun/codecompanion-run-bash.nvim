@@ -1,7 +1,8 @@
 ---@brief
 ---
 --- Generic path resolution for sandbox backends.
---- Expands ~, $VAR, XDG fallbacks; checks existence per rule type.
+--- Expands ~, $VAR, XDG fallbacks; anchors relative paths to the process cwd;
+--- checks existence per rule type.
 
 local uv = vim.uv
 
@@ -47,7 +48,14 @@ function M.resolve_path(path, check_existence, fs_stat)
     end
   end
 
-  -- Step 3: existence check (only for fs_readable/fs_writable;
+  -- Step 3: contract requires absolute paths — anchor relative paths
+  -- (".", "./x", "../x", "plain/rel") to the process cwd. abspath leaves a
+  -- leading ".." unresolved, so normalize once more to collapse it.
+  if normalized ~= "" and not vim.startswith(normalized, "/") then
+    normalized = vim.fs.normalize(vim.fs.abspath(normalized))
+  end
+
+  -- Step 4: existence check (only for fs_readable/fs_writable;
   -- fs_denied skips this — backends may accept non-existent deny paths)
   if check_existence then
     if normalized == "" or not fs_stat(normalized) then

@@ -235,6 +235,19 @@ T["isolation"]["allowed write succeeds"] = function(driver)
   pcall(os.remove, file_path)
 end
 
+T["isolation"]["cwd write via dot rule succeeds"] = function(driver)
+  skip_guard(driver)
+
+  -- Default-config rules grant cwd write via "."; the resolver must anchor
+  -- it to the process cwd or the sandboxed touch cannot create the file here.
+  local file_path = "./cc-matrix-dot-" .. math.random(10000, 99999) .. ".tmp"
+  local result = Util.run_and_wait(driver, "touch " .. file_path)
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  MiniTest.expect.equality(0, result.exit_code)
+  pcall(os.remove, file_path)
+end
+
 T["isolation"]["fs_denied read fails"] = function(driver)
   skip_guard(driver)
 

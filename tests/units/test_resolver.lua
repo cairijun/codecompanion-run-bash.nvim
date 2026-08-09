@@ -78,6 +78,32 @@ T["resolve_path: trailing slash removed"] = function()
   MiniTest.expect.equality("/usr", result)
 end
 
+T["resolve_path: bare dot anchors to cwd"] = function()
+  local result = resolver.resolve_path(".", false)
+  MiniTest.expect.equality(vim.fn.getcwd(), result)
+end
+
+T["resolve_path: dot-slash anchors to cwd"] = function()
+  local result = resolver.resolve_path("./sub", false)
+  MiniTest.expect.equality(vim.fn.getcwd() .. "/sub", result)
+end
+
+T["resolve_path: plain relative anchors to cwd"] = function()
+  local result = resolver.resolve_path("relative/dir", false)
+  MiniTest.expect.equality(vim.fn.getcwd() .. "/relative/dir", result)
+end
+
+T["resolve_path: leading dotdot collapses against cwd"] = function()
+  local result = resolver.resolve_path("../dot-sibling", false)
+  MiniTest.expect.equality(vim.fn.fnamemodify(vim.fn.getcwd(), ":h") .. "/dot-sibling", result)
+end
+
+T["resolve_path: bare dot with existence check anchors to cwd"] = function()
+  -- cwd always exists, so the existence check must pass for "."
+  local result = resolver.resolve_path(".", true)
+  MiniTest.expect.equality(vim.fn.getcwd(), result)
+end
+
 -- ── resolve_fs_rules tests ───────────────────────────────────────
 
 local function truthy_fs()

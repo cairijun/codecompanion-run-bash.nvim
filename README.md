@@ -62,6 +62,7 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
               -- Rules appended to the profile at runtime
               -- Paths are auto-expanded: `~`, `$VAR`,
               -- and XDG fallbacks (e.g. `$XDG_DATA_HOME` → `~/.local/share`) are resolved
+              -- Relative paths (e.g. `.`) resolve against the Neovim working directory
               -- see [sandbox/init.lua](lua/codecompanion/_extensions/run_bash/sandbox/init.lua) for default rules
               rules = {
                 -- Extra paths allowed reading at runtime.

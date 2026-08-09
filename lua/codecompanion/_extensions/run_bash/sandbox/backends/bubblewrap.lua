@@ -39,14 +39,16 @@ function M._build_args(opts, cmd, resolved_rules, deps)
 
   local spawn_args = {}
 
-  for _, path in ipairs(resolved_rules.writable or {}) do
-    table.insert(spawn_args, "--bind")
+  for _, path in ipairs(resolved_rules.readable or {}) do
+    table.insert(spawn_args, "--ro-bind")
     table.insert(spawn_args, path)
     table.insert(spawn_args, path)
   end
 
-  for _, path in ipairs(resolved_rules.readable or {}) do
-    table.insert(spawn_args, "--ro-bind")
+  -- Emitted after readable so a path present in both groups ends up
+  -- writable: bwrap mounts are last-mount-wins.
+  for _, path in ipairs(resolved_rules.writable or {}) do
+    table.insert(spawn_args, "--bind")
     table.insert(spawn_args, path)
     table.insert(spawn_args, path)
   end

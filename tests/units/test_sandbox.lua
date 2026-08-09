@@ -423,6 +423,78 @@ T["custom backend"]["module key not passed to backend functions"] = function()
   MiniTest.expect.equality("value", captured.opts.some_key, "other keys should be preserved")
 end
 
+T["custom backend"]["run receives resolved absolute rules"] = function()
+  -- Contract: the facade hands backends fully-resolved absolute paths in
+  -- exec_params.resolved_rules. The default config's "." entry must arrive
+  -- as the cwd — a custom backend matching absolute paths (ptrace-fence)
+  -- silently received "." before the resolver anchored relative inputs.
+  local captured = {}
+  local backend = {
+    is_available = function()
+      return true
+    end,
+    validate_opts = function()
+      return nil
+    end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = true, fs_deny_dirs = "block" }
+    end,
+    get_description = function()
+      return "custom"
+    end,
+    run = function(opts, exec_params)
+      captured.resolved_rules = exec_params.resolved_rules
+      return {}, 12345, true, nil
+    end,
+    kill = function() end,
+  }
+  package.loaded["tests.mocks.custom_backend"] = backend
+
+  local no_op = function() end
+  sandbox.run({
+    backend = "custom",
+    rules = {
+      fs_writable = { "." },
+      fs_readable = { "./" },
+      fs_denied = { "/nonexistent-deny-xyz" },
+    },
+    backends = {
+      custom = {
+        module = "tests.mocks.custom_backend",
+      },
+    },
+  }, {
+    cmd = "echo hi",
+    fd = 3,
+    use_sandbox = true,
+    on_exit = no_op,
+    deps = {
+      spawn = function()
+        return {}
+      end,
+      unref = no_op,
+    },
+  })
+  package.loaded["tests.mocks.custom_backend"] = nil
+
+  MiniTest.expect.equality(vim.fn.getcwd(), captured.resolved_rules.writable[1])
+  MiniTest.expect.equality(vim.fn.getcwd(), captured.resolved_rules.readable[1])
+  MiniTest.expect.equality(
+    "/nonexistent-deny-xyz",
+    captured.resolved_rules.denied[1],
+    "absolute deny paths pass through without existence check"
+  )
+  for _, group in ipairs({ "readable", "writable", "denied" }) do
+    for _, entry in ipairs(captured.resolved_rules[group]) do
+      MiniTest.expect.equality(
+        true,
+        vim.startswith(entry, "/"),
+        "resolved " .. group .. " entry must be absolute: " .. tostring(entry)
+      )
+    end
+  end
+end
+
 -- Negative cases
 T["custom backend"]["unknown backend without module returns error"] = function()
   local err = sandbox.validate_backend_opts({

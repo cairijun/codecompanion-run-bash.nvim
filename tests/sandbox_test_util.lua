@@ -4,9 +4,11 @@ local uv = vim.uv
 local M = {}
 
 ---Common filesystem rules used by the parameterized backend matrix.
+-- "." is the default-config form of the cwd write grant; the resolver must
+-- anchor it to the process cwd before backends consume the rules.
 M.common_rules = {
-  fs_writable = { vim.fn.getcwd(), "/tmp" },
-  fs_readable = { vim.fn.getcwd(), "/usr", "/bin", "/lib", "/lib64" },
+  fs_writable = { ".", "/tmp" },
+  fs_readable = { ".", "/usr", "/bin", "/lib", "/lib64" },
   fs_denied = {},
 }
 
