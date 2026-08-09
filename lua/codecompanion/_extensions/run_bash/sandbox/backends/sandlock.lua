@@ -69,19 +69,21 @@ end
 ---@return string|nil err Error message, or nil if valid
 function M.validate_opts(opts)
   if opts and opts.profile ~= nil and type(opts.profile) ~= "string" then
-    return "run_bash: sandbox.backends.sandlock.profile must be a string or nil"
+    return "sandbox.backends.sandlock.profile must be a string or nil"
   end
   if opts and opts.extra_args ~= nil and type(opts.extra_args) ~= "table" then
-    return "run_bash: sandbox.backends.sandlock.extra_args must be a table or nil"
+    return "sandbox.backends.sandlock.extra_args must be a table or nil"
   end
   return nil
 end
 
 ---Return capability flags for this backend.
----@return table
+---@return table { kill_by_name: boolean, fs_deny_files: boolean, fs_deny_dirs: false|"block"|"mask" }
 function M.capabilities()
   return {
-    named_sandbox = true,
+    kill_by_name = true,
+    fs_deny_files = true,
+    fs_deny_dirs = "block",
   }
 end
 

@@ -97,16 +97,18 @@ end
 ---@return string|nil err Error message, or nil if valid
 function M.validate_opts(opts)
   if opts and opts.extra_args ~= nil and type(opts.extra_args) ~= "table" then
-    return "run_bash: sandbox.backends.bubblewrap.extra_args must be a table or nil"
+    return "sandbox.backends.bubblewrap.extra_args must be a table or nil"
   end
   return nil
 end
 
 ---Return capability flags for this backend.
----@return table
+---@return table { kill_by_name: boolean, fs_deny_files: boolean, fs_deny_dirs: false|"block"|"mask" }
 function M.capabilities()
   return {
-    named_sandbox = false,
+    kill_by_name = false,
+    fs_deny_files = false,
+    fs_deny_dirs = "mask",
   }
 end
 

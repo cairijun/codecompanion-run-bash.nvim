@@ -126,7 +126,9 @@ end
 
 T["capabilities: returns expected flags"] = function()
   MiniTest.expect.equality({
-    named_sandbox = true,
+    kill_by_name = true,
+    fs_deny_files = true,
+    fs_deny_dirs = "block",
   }, backend.capabilities())
 end
 

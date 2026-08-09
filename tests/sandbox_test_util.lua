@@ -16,6 +16,8 @@ M.common_rules = {
 ---@param rule_overrides? table { fs_readable?, fs_writable?, fs_denied? }
 ---@return table
 function M.build_sandbox_opts(driver, rule_overrides)
+  -- vim.tbl_deep_extend preserves nested tables like backends.custom.module
+  -- because rule_overrides only contains fs_readable, fs_writable, fs_denied.
   local opts = vim.tbl_deep_extend("force", {}, driver.sandbox_opts or {})
   if driver.name == "none" then
     return opts

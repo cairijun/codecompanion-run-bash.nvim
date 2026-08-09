@@ -47,14 +47,17 @@ T["facade: should_use false when backend disabled"] = function()
 end
 
 T["facade: unknown backend errors with descriptive message"] = function()
-  local ok, err = pcall(function()
-    sandbox.is_available({ backend = "unknown" })
-  end)
-  MiniTest.expect.equality(false, ok)
+  local err = sandbox.validate_backend_opts({ backend = "unknown" })
+  MiniTest.expect.equality(true, type(err) == "string", "error should be a string")
   MiniTest.expect.equality(
     true,
-    type(err) == "string" and err:find("unknown backend") ~= nil,
-    "error should mention 'unknown backend': " .. tostring(err)
+    err:find("custom backend") ~= nil,
+    "error should mention 'custom backend': " .. tostring(err)
+  )
+  MiniTest.expect.equality(
+    true,
+    err:find("module") ~= nil,
+    "error should mention 'module': " .. tostring(err)
   )
 end
 
@@ -91,7 +94,7 @@ T["facade: run returns nil sandbox_name for non-naming backend"] = function()
   local bw_path = "codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"
   package.loaded[bw_path] = {
     capabilities = function()
-      return { named_sandbox = false }
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
     end,
     run = function(opts, exec_params)
       local deps = exec_params.deps or {}
@@ -169,7 +172,9 @@ T["facade: should_use true when backend available"] = function()
     is_available = function()
       return true
     end,
-    capabilities = function() end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
+    end,
     run = function() end,
     kill = function() end,
     validate_opts = function() end,
@@ -187,7 +192,9 @@ T["facade: is_available dispatches to backend"] = function()
       called = true
       return opts.ready
     end,
-    capabilities = function() end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
+    end,
     run = function() end,
     kill = function() end,
     validate_opts = function() end,
@@ -204,7 +211,9 @@ end
 T["facade: get_description dispatches to backend"] = function()
   package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
     is_available = function() end,
-    capabilities = function() end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
+    end,
     run = function() end,
     kill = function() end,
     validate_opts = function() end,
@@ -220,7 +229,9 @@ end
 T["facade: validate_backend_opts dispatches to backend"] = function()
   package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
     is_available = function() end,
-    capabilities = function() end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
+    end,
     run = function() end,
     kill = function() end,
     validate_opts = function(opts)
@@ -356,6 +367,159 @@ end
 T["non-sandbox: kill without callback does not error"] = function()
   local ok, err = pcall(sandbox.kill, { backend = false }, nil, 99999)
   MiniTest.expect.equality(true, ok, "kill without callback should not error: " .. tostring(err))
+end
+
+-- Custom backend tests
+T["custom backend"] = MiniTest.new_set()
+
+-- Positive cases
+T["custom backend"]["custom module loads and dispatches"] = function()
+  -- This test will fail until load_backend is refactored
+  local ok, err = pcall(function()
+    sandbox.is_available({
+      backend = "custom",
+      backends = {
+        custom = {
+          module = "tests.mocks.custom_backend",
+        },
+      },
+    })
+  end)
+  MiniTest.expect.equality(true, ok, "should not error: " .. tostring(err))
+end
+
+T["custom backend"]["module key not passed to backend functions"] = function()
+  -- This test will fail until load_backend is refactored
+  local captured = {}
+  local backend = {
+    is_available = function(opts)
+      captured.opts = opts
+      return true
+    end,
+    validate_opts = function(opts)
+      return nil
+    end,
+    capabilities = function()
+      return { kill_by_name = true, fs_deny_files = true, fs_deny_dirs = "block" }
+    end,
+    get_description = function()
+      return "custom"
+    end,
+    run = function() end,
+    kill = function() end,
+  }
+  package.loaded["tests.mocks.custom_backend"] = backend
+  sandbox.is_available({
+    backend = "custom",
+    backends = {
+      custom = {
+        module = "tests.mocks.custom_backend",
+        some_key = "value",
+      },
+    },
+  })
+  package.loaded["tests.mocks.custom_backend"] = nil
+  MiniTest.expect.equality(nil, captured.opts.module, "module key should be stripped")
+  MiniTest.expect.equality("value", captured.opts.some_key, "other keys should be preserved")
+end
+
+-- Negative cases
+T["custom backend"]["unknown backend without module returns error"] = function()
+  local err = sandbox.validate_backend_opts({
+    backend = "custom",
+    backends = {
+      custom = {},
+    },
+  })
+  MiniTest.expect.equality(true, type(err) == "string", "error should be a string")
+  MiniTest.expect.equality(
+    true,
+    err:find("custom backend") ~= nil,
+    "error should mention 'custom backend': " .. tostring(err)
+  )
+  MiniTest.expect.equality(
+    true,
+    err:find("module") ~= nil,
+    "error should mention 'module': " .. tostring(err)
+  )
+end
+
+T["custom backend"]["module not string returns error"] = function()
+  local err = sandbox.validate_backend_opts({
+    backend = "custom",
+    backends = {
+      custom = {
+        module = 123,
+      },
+    },
+  })
+  MiniTest.expect.equality(true, type(err) == "string", "error should be a string")
+  MiniTest.expect.equality(
+    true,
+    err:find("module") ~= nil,
+    "error should mention 'module': " .. tostring(err)
+  )
+  MiniTest.expect.equality(
+    true,
+    err:find("string") ~= nil,
+    "error should mention 'string': " .. tostring(err)
+  )
+end
+
+T["custom backend"]["custom module missing required functions returns error"] = function()
+  local incomplete = {
+    is_available = function() end,
+    -- missing validate_opts, capabilities, get_description, run, kill
+  }
+  package.loaded["tests.mocks.incomplete_backend"] = incomplete
+  local err = sandbox.validate_backend_opts({
+    backend = "custom",
+    backends = {
+      custom = {
+        module = "tests.mocks.incomplete_backend",
+      },
+    },
+  })
+  package.loaded["tests.mocks.incomplete_backend"] = nil
+  MiniTest.expect.equality(true, type(err) == "string", "error should be a string")
+  MiniTest.expect.equality(
+    true,
+    err:find("kill") ~= nil,
+    "error should mention missing function 'kill': " .. tostring(err)
+  )
+end
+
+T["custom backend"]["invalid module path returns require error"] = function()
+  local err = sandbox.validate_backend_opts({
+    backend = "custom",
+    backends = {
+      custom = {
+        module = "nonexistent.module.path",
+      },
+    },
+  })
+  MiniTest.expect.equality(true, type(err) == "string", "error should be a string")
+end
+
+-- Boundary cases
+T["custom backend"]["built-in backend names still load internal modules"] = function()
+  -- Even if backends.sandlock.module is present, built-in should load internal module
+  local ok, err = pcall(function()
+    sandbox.is_available({
+      backend = "sandlock",
+      backends = {
+        sandlock = {
+          module = "some.custom.module",
+          profile = Helpers.sandbox_profile_path(),
+        },
+      },
+    })
+  end)
+  MiniTest.expect.equality(true, ok, "should not error: " .. tostring(err))
+end
+
+T["custom backend"]["backend = false still disables sandbox"] = function()
+  MiniTest.expect.equality(false, sandbox.is_available({ backend = false }))
 end
 
 return T

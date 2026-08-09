@@ -4,10 +4,13 @@ local Util = require("tests.sandbox_test_util")
 local T = MiniTest.new_set()
 
 -- Keep in sync with KNOWN_BACKENDS in lua/codecompanion/_extensions/run_bash/sandbox/init.lua.
+local bubblewrap_backend = require("codecompanion._extensions.run_bash.sandbox.backends.bubblewrap")
+local sandlock_backend = require("codecompanion._extensions.run_bash.sandbox.backends.sandlock")
+
 local sandlock_driver = {
   name = "sandlock",
   sandbox_used = true,
-  supports_named_sandbox = true,
+  capabilities = sandlock_backend.capabilities(),
   sandbox_opts = {
     backends = {
       sandlock = {
@@ -20,16 +23,54 @@ local sandlock_driver = {
 local bubblewrap_driver = {
   name = "bubblewrap",
   sandbox_used = true,
-  supports_named_sandbox = false,
+  capabilities = bubblewrap_backend.capabilities(),
   sandbox_opts = {},
 }
 
 local none_driver = {
   name = "none",
   sandbox_used = false,
-  supports_named_sandbox = false,
+  capabilities = { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = false },
   sandbox_opts = { backend = false },
 }
+
+-- Custom driver injection from environment variable
+local custom_driver = nil
+local custom_module_path = os.getenv("TEST_CC_RUN_BASH_CUSTOM_BACKEND")
+if custom_module_path and custom_module_path ~= "" then
+  local ok, mod = pcall(require, custom_module_path)
+  if not ok then
+    error("Failed to load custom backend module '" .. custom_module_path .. "': " .. tostring(mod))
+  end
+  -- Validate capabilities
+  local caps = mod.capabilities()
+  assert(type(caps) == "table", "custom backend capabilities() must return a table")
+  assert(
+    type(caps.kill_by_name) == "boolean",
+    "custom backend capabilities().kill_by_name must be a boolean"
+  )
+  assert(
+    caps.fs_deny_files == true or caps.fs_deny_files == false,
+    "custom backend capabilities().fs_deny_files must be a boolean"
+  )
+  assert(
+    caps.fs_deny_dirs == false or caps.fs_deny_dirs == "block" or caps.fs_deny_dirs == "mask",
+    "custom backend capabilities().fs_deny_dirs must be false, 'block', or 'mask'"
+  )
+  custom_driver = {
+    name = "custom",
+    is_custom = true,
+    sandbox_used = true,
+    capabilities = caps,
+    sandbox_opts = {
+      backends = {
+        custom = {
+          module = custom_module_path,
+        },
+      },
+    },
+  }
+end
 
 T["matrix"] = MiniTest.new_set({
   hooks = {
@@ -37,22 +78,34 @@ T["matrix"] = MiniTest.new_set({
       -- Parametrize args are not available here; per-driver skip is done in each case body.
     end,
   },
-  parametrize = {
-    { sandlock_driver },
-    { bubblewrap_driver },
-    { none_driver },
-  },
+  parametrize = (function()
+    local list = {
+      { sandlock_driver },
+      { bubblewrap_driver },
+      { none_driver },
+    }
+    if custom_driver then
+      table.insert(list, { custom_driver })
+    end
+    return list
+  end)(),
 })
 
-local function skip_if_not_selected(driver)
-  if not Helpers.should_test_backend(driver.name) then
-    MiniTest.skip(string.format("Backend '%s' not selected for test", driver.name))
+local function skip_guard(driver)
+  if driver.is_custom then
+    if not custom_driver then
+      MiniTest.skip("Custom backend not configured (TEST_CC_RUN_BASH_CUSTOM_BACKEND not set)")
+    end
+  else
+    if not Helpers.should_test_backend(driver.name) then
+      MiniTest.skip(string.format("Backend '%s' not selected for test", driver.name))
+    end
   end
 end
 
 local function expect_sandbox_meta(driver, result)
   MiniTest.expect.equality(driver.sandbox_used, result.sandbox_used, "sandbox_used mismatch")
-  if driver.supports_named_sandbox then
+  if driver.capabilities.kill_by_name then
     MiniTest.expect.equality("string", type(result.sandbox_name), "sandbox_name should be a string")
   else
     MiniTest.expect.equality(nil, result.sandbox_name, "sandbox_name should be nil")
@@ -60,7 +113,7 @@ local function expect_sandbox_meta(driver, result)
 end
 
 T["matrix"]["echo succeeds"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo hello")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -69,7 +122,7 @@ T["matrix"]["echo succeeds"] = function(driver)
 end
 
 T["matrix"]["exit code is propagated"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "false")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -77,7 +130,7 @@ T["matrix"]["exit code is propagated"] = function(driver)
 end
 
 T["matrix"]["allowed read succeeds"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "test -r /usr/bin/bash && echo ok")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -86,7 +139,7 @@ T["matrix"]["allowed read succeeds"] = function(driver)
 end
 
 T["matrix"]["output interleaving"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo out1; echo err1 >&2; echo out2")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -96,7 +149,7 @@ T["matrix"]["output interleaving"] = function(driver)
 end
 
 T["matrix"]["multi-line command with pipe"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo hello | sed 's/hello/world/'")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -104,7 +157,7 @@ T["matrix"]["multi-line command with pipe"] = function(driver)
 end
 
 T["matrix"]["stderr-only output"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo err1 >&2")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -112,7 +165,7 @@ T["matrix"]["stderr-only output"] = function(driver)
 end
 
 T["matrix"]["empty output"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "true")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -121,14 +174,14 @@ T["matrix"]["empty output"] = function(driver)
 end
 
 T["matrix"]["returns sandbox_used and sandbox_name"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo x")
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
 end
 
 T["matrix"]["kill terminates sleep"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.spawn(driver, "sleep 30")
   MiniTest.expect.equality(true, result.handle ~= nil, result.error or "")
   expect_sandbox_meta(driver, result)
@@ -142,7 +195,7 @@ T["matrix"]["kill terminates sleep"] = function(driver)
 end
 
 T["matrix"]["kill callback fires"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
   local result = Util.spawn(driver, "sleep 30")
   MiniTest.expect.equality(true, result.handle ~= nil, result.error or "")
 
@@ -159,14 +212,20 @@ end
 
 -- Isolation tests apply only to real sandbox backends, not the non-sandbox baseline.
 T["isolation"] = MiniTest.new_set({
-  parametrize = {
-    { sandlock_driver },
-    { bubblewrap_driver },
-  },
+  parametrize = (function()
+    local list = {
+      { sandlock_driver },
+      { bubblewrap_driver },
+    }
+    if custom_driver then
+      table.insert(list, { custom_driver })
+    end
+    return list
+  end)(),
 })
 
 T["isolation"]["allowed write succeeds"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
 
   local file_path = "/tmp/cc-matrix-write-" .. math.random(10000, 99999) .. ".txt"
   local result = Util.run_and_wait(driver, "touch " .. file_path)
@@ -177,14 +236,93 @@ T["isolation"]["allowed write succeeds"] = function(driver)
 end
 
 T["isolation"]["fs_denied read fails"] = function(driver)
-  skip_if_not_selected(driver)
+  skip_guard(driver)
 
-  if driver.name == "sandlock" then
-    local result = Util.run_and_wait(driver, "cat /etc/shadow 2>&1 || echo DENIED")
+  local caps = driver.capabilities
+  -- Skip if backend cannot deny files or directories at all
+  if not caps.fs_deny_files and caps.fs_deny_dirs == false then
+    MiniTest.skip("Backend cannot deny files or directories")
+  end
+  -- Backends with fs_deny_dirs == "mask" skip this case; their directory-masking behavior
+  -- is covered by "fs_denied masks existing directory".
+  if caps.fs_deny_dirs == "mask" and not caps.fs_deny_files then
+    MiniTest.skip("Backend only masks directories, covered by other test")
+  end
+
+  -- Test file denial if supported
+  if caps.fs_deny_files then
+    local deny_dir = Helpers.temp_dir()
+    local marker = deny_dir .. "/marker.txt"
+    local f = io.open(marker, "w")
+    if f then
+      f:write("secret")
+      f:close()
+    end
+    local result = Util.run_and_wait(
+      driver,
+      "cat " .. marker .. " 2>&1 || echo DENIED",
+      { fs_denied = { marker } }
+    )
+    pcall(os.remove, marker)
+    Helpers.cleanup_dir(deny_dir)
     MiniTest.expect.equality(true, result.completed, result.error or "")
     expect_sandbox_meta(driver, result)
     Helpers.expect_contains("DENIED", result.content)
     return
+  end
+
+  -- Test directory denial if supported (block mode)
+  if caps.fs_deny_dirs == "block" then
+    local deny_dir = Helpers.temp_dir()
+    local marker = deny_dir .. "/marker.txt"
+    local f = io.open(marker, "w")
+    if f then
+      f:write("secret")
+      f:close()
+    end
+    local result = Util.run_and_wait(
+      driver,
+      "cat " .. marker .. " 2>&1 || echo DENIED",
+      { fs_denied = { deny_dir } }
+    )
+    pcall(os.remove, marker)
+    Helpers.cleanup_dir(deny_dir)
+    MiniTest.expect.equality(true, result.completed, result.error or "")
+    expect_sandbox_meta(driver, result)
+    Helpers.expect_contains("DENIED", result.content)
+    return
+  end
+
+  MiniTest.skip("No applicable denial capability for this test")
+end
+
+T["isolation"]["fs_denied write fails"] = function(driver)
+  skip_guard(driver)
+
+  -- Skip unless backend supports directory blocking
+  if driver.capabilities.fs_deny_dirs ~= "block" then
+    MiniTest.skip("Backend does not support directory blocking (fs_deny_dirs != 'block')")
+  end
+
+  local deny_dir = Helpers.temp_dir()
+  local file_path = deny_dir .. "/test.txt"
+  local result = Util.run_and_wait(
+    driver,
+    "touch " .. file_path .. " 2>&1 || echo DENIED",
+    { fs_denied = { deny_dir } }
+  )
+  Helpers.cleanup_dir(deny_dir)
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  Helpers.expect_contains("DENIED", result.content)
+end
+
+T["isolation"]["fs_denied masks existing directory"] = function(driver)
+  skip_guard(driver)
+
+  -- Skip unless backend supports directory masking
+  if driver.capabilities.fs_deny_dirs ~= "mask" then
+    MiniTest.skip("Backend does not support directory masking (fs_deny_dirs != 'mask')")
   end
 
   local deny_dir = Helpers.temp_dir()
@@ -196,87 +334,37 @@ T["isolation"]["fs_denied read fails"] = function(driver)
   end
   local result = Util.run_and_wait(
     driver,
-    "cat " .. marker .. " 2>&1 || echo DENIED",
+    "ls " .. deny_dir .. " 2>&1 || echo MASKED",
     { fs_denied = { deny_dir } }
   )
   pcall(os.remove, marker)
   Helpers.cleanup_dir(deny_dir)
   MiniTest.expect.equality(true, result.completed, result.error or "")
   expect_sandbox_meta(driver, result)
-  Helpers.expect_contains("DENIED", result.content)
+  MiniTest.expect.equality(
+    nil,
+    result.content:find("marker.txt", 1, true),
+    "denied dir should be masked"
+  )
 end
 
-T["isolation"]["fs_denied write fails"] = function(driver)
-  skip_if_not_selected(driver)
+-- Capability enum tests for built-in backends
+T["capabilities"] = MiniTest.new_set()
 
-  if driver.name == "sandlock" then
-    local result =
-      Util.run_and_wait(driver, "touch /tmp/cc-run-bash-test-deny/file 2>&1 || echo DENIED")
-    MiniTest.expect.equality(true, result.completed, result.error or "")
-    expect_sandbox_meta(driver, result)
-    Helpers.expect_contains("DENIED", result.content)
-    return
-  end
-
-  -- bubblewrap's --tmpfs turns a denied directory into an empty writable tmpfs,
-  -- so "write fails" is not the right assertion. Verify the original content is
-  -- masked instead.
-  if driver.name == "bubblewrap" then
-    local deny_dir = Helpers.temp_dir()
-    local marker = deny_dir .. "/marker.txt"
-    local f = io.open(marker, "w")
-    if f then
-      f:write("secret")
-      f:close()
-    end
-    local result =
-      Util.run_and_wait(driver, "ls " .. deny_dir .. " 2>&1", { fs_denied = { deny_dir } })
-    pcall(os.remove, marker)
-    Helpers.cleanup_dir(deny_dir)
-    MiniTest.expect.equality(true, result.completed, result.error or "")
-    expect_sandbox_meta(driver, result)
-    MiniTest.expect.equality(
-      nil,
-      result.content:find("marker.txt", 1, true),
-      "denied dir should be masked"
-    )
-    return
-  end
+T["capabilities"]["sandlock returns correct enum capabilities"] = function()
+  local backend = require("codecompanion._extensions.run_bash.sandbox.backends.sandlock")
+  local caps = backend.capabilities()
+  MiniTest.expect.equality(true, caps.kill_by_name)
+  MiniTest.expect.equality(true, caps.fs_deny_files)
+  MiniTest.expect.equality("block", caps.fs_deny_dirs)
 end
 
-T["isolation"]["fs_denied masks existing directory"] = function(driver)
-  skip_if_not_selected(driver)
-
-  if driver.name == "bubblewrap" then
-    local deny_dir = Helpers.temp_dir()
-    local marker = deny_dir .. "/marker.txt"
-    local f = io.open(marker, "w")
-    if f then
-      f:write("x")
-      f:close()
-    end
-    local result = Util.run_and_wait(
-      driver,
-      "ls " .. deny_dir .. " 2>&1 || echo MASKED",
-      { fs_denied = { deny_dir } }
-    )
-    pcall(os.remove, marker)
-    Helpers.cleanup_dir(deny_dir)
-    MiniTest.expect.equality(true, result.completed, result.error or "")
-    expect_sandbox_meta(driver, result)
-    MiniTest.expect.equality(
-      nil,
-      result.content:find("marker.txt", 1, true),
-      "denied dir should be masked"
-    )
-    return
-  end
-
-  -- sandlock: /etc is readable but /etc/shadow is denied.
-  local result = Util.run_and_wait(driver, "cat /etc/shadow 2>&1 || echo MASKED")
-  MiniTest.expect.equality(true, result.completed, result.error or "")
-  expect_sandbox_meta(driver, result)
-  Helpers.expect_contains("MASKED", result.content)
+T["capabilities"]["bubblewrap returns correct enum capabilities"] = function()
+  local backend = require("codecompanion._extensions.run_bash.sandbox.backends.bubblewrap")
+  local caps = backend.capabilities()
+  MiniTest.expect.equality(false, caps.kill_by_name)
+  MiniTest.expect.equality(false, caps.fs_deny_files)
+  MiniTest.expect.equality("mask", caps.fs_deny_dirs)
 end
 
 return T

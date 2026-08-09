@@ -1,16 +1,15 @@
 ---@brief
 ---
 --- Sandbox execution facade.
---- Dispatches to pluggable backends (sandlock, bubblewrap) based on opts.backend.
---- Generates sandbox_name as an additional run() return value for backends
---- that support named sandboxes.
+--- Dispatches to pluggable backends (sandlock, bubblewrap, or custom modules) based on opts.backend.
+--- Custom backends are loaded from opts.backends[name].module and validated at load time.
 ---
 --- Backend interface contract (each backend module must implement):
 ---   is_available(opts)        -> boolean
 ---   validate_opts(opts)       -> string|nil   (error msg or nil)
----   capabilities()            -> table  { named_sandbox }
+---   capabilities()            -> table  { kill_by_name: bool, fs_deny_files: bool, fs_deny_dirs: false|"block"|"mask" }
 ---   get_description()         -> string
----   run(opts, exec_params)     -> handle|nil, pid|string|nil, sandbox_used:bool
+---   run(opts, exec_params)     -> handle|nil, pid|string|nil, sandbox_used:bool, sandbox_name:string|nil
 ---   kill(opts, name, pid, cb, deps) -> nil
 
 local uv = vim.uv
@@ -47,7 +46,7 @@ function M._internal.two_stage_kill(pid, on_killed, deps)
   unref(kill_timer)
 end
 
----Known backend names. load_backend errors for anything not in this list.
+---Known built-in backend names. Custom backends are discovered via opts.backends[name].module.
 -- Keep in sync with the driver list in tests/units/test_sandbox_backends.lua.
 local KNOWN_BACKENDS = { "sandlock", "bubblewrap" }
 
@@ -62,20 +61,81 @@ local function gen_sandbox_name()
 end
 
 ---Load a backend module by name. Errors for unknown backends.
----@param name string Backend name (e.g. "sandlock")
----@return table backend module
-local function load_backend(name)
-  if not vim.tbl_contains(KNOWN_BACKENDS, name) then
-    error("run_bash: unknown backend: " .. tostring(name))
+---@param name string Backend name (e.g. "sandlock", "custom")
+---@param opts table Full sandbox_opts ({ backend, backends })
+---@return table|nil backend module
+---@return string|nil error message
+local function load_backend(name, opts)
+  if vim.tbl_contains(KNOWN_BACKENDS, name) then
+    return require("codecompanion._extensions.run_bash.sandbox.backends." .. name), nil
   end
-  return require("codecompanion._extensions.run_bash.sandbox.backends." .. name)
+
+  -- Custom backend: load from user-supplied module
+  local raw = opts and opts.backends and opts.backends[name]
+  local module_path = raw and raw.module
+  if module_path == nil then
+    return nil, "custom backend '" .. name .. "' requires backends." .. name .. ".module"
+  end
+  if type(module_path) ~= "string" then
+    return nil, "custom backend '" .. name .. "' module must be a string"
+  end
+
+  local ok, mod = pcall(require, module_path)
+  if not ok then
+    return nil, mod
+  end
+
+  -- Validate required interface functions
+  local missing = {}
+  for _, fn in ipairs({
+    "is_available",
+    "validate_opts",
+    "capabilities",
+    "get_description",
+    "run",
+    "kill",
+  }) do
+    if type(mod[fn]) ~= "function" then
+      table.insert(missing, fn)
+    end
+  end
+  if #missing > 0 then
+    return nil,
+      "custom backend '" .. name .. "' missing required functions: " .. table.concat(missing, ", ")
+  end
+
+  -- Validate capabilities() return shape
+  local caps_ok, caps = pcall(mod.capabilities)
+  if not caps_ok or type(caps) ~= "table" then
+    return nil, "custom backend '" .. name .. "' capabilities() must return a table"
+  end
+  if type(caps.kill_by_name) ~= "boolean" then
+    return nil, "custom backend '" .. name .. "' capabilities().kill_by_name must be a boolean"
+  end
+  if not (caps.fs_deny_files == true or caps.fs_deny_files == false) then
+    return nil, "custom backend '" .. name .. "' capabilities().fs_deny_files must be a boolean"
+  end
+  if
+    not (caps.fs_deny_dirs == false or caps.fs_deny_dirs == "block" or caps.fs_deny_dirs == "mask")
+  then
+    return nil,
+      "custom backend '"
+        .. name
+        .. "' capabilities().fs_deny_dirs must be false, 'block', or 'mask'"
+  end
+
+  return mod, nil
 end
 
 ---Extract the backend-specific opts subtable from full sandbox_opts.
+---Returns a copy with the `module` key removed (custom backend config only).
 ---@param opts table Full sandbox_opts ({ backend, rules, backends })
 ---@return table backend-specific config (e.g. { profile, extra_args })
 local function backend_opts(opts)
-  return (opts.backends and opts.backends[opts.backend]) or {}
+  local raw = (opts.backends and opts.backends[opts.backend]) or {}
+  local copy = vim.deepcopy(raw)
+  copy.module = nil
+  return copy
 end
 
 ---Built-in default sandbox configuration.
@@ -127,7 +187,10 @@ function M.is_available(opts)
   if not opts or not opts.backend then
     return false
   end
-  local backend = load_backend(opts.backend)
+  local backend, err = load_backend(opts.backend, opts)
+  if err then
+    return false
+  end
   return backend.is_available(backend_opts(opts))
 end
 
@@ -174,12 +237,15 @@ function M.run(opts, exec_params)
   end
 
   -- Sandboxed execution: load backend, resolve rules, generate name
-  local backend = load_backend(opts.backend)
+  local backend, err = load_backend(opts.backend, opts)
+  if err then
+    return nil, err, false, nil
+  end
   local b_opts = backend_opts(opts)
   local resolved_rules = resolver.resolve_fs_rules(opts.rules)
 
   local sandbox_name = nil
-  if backend.capabilities().named_sandbox then
+  if backend.capabilities().kill_by_name then
     sandbox_name = gen_sandbox_name()
   end
 
@@ -212,7 +278,12 @@ function M.kill(opts, sandbox_name, pid, on_killed, deps)
     return
   end
 
-  local backend = load_backend(opts.backend)
+  local backend, err = load_backend(opts.backend, opts)
+  if err then
+    -- Load failed: fall back to two_stage_kill for safety.
+    M._internal.two_stage_kill(pid, on_killed, deps)
+    return
+  end
   backend.kill(backend_opts(opts), sandbox_name, pid, on_killed, deps)
 end
 
@@ -223,7 +294,10 @@ function M.get_description(opts)
   if not opts or not opts.backend then
     return "Requires user approval for all commands."
   end
-  local backend = load_backend(opts.backend)
+  local backend, err = load_backend(opts.backend, opts)
+  if err then
+    return "Requires user approval for all commands."
+  end
   return backend.get_description()
 end
 
@@ -234,7 +308,10 @@ function M.validate_backend_opts(opts)
   if not opts or not opts.backend then
     return nil
   end
-  local backend = load_backend(opts.backend)
+  local backend, err = load_backend(opts.backend, opts)
+  if err then
+    return err
+  end
   return backend.validate_opts(backend_opts(opts))
 end
 
