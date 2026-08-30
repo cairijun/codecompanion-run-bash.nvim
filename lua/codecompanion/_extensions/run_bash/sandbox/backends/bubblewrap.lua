@@ -39,14 +39,16 @@ function M._build_args(opts, cmd, resolved_rules, deps)
 
   local spawn_args = {}
 
-  for _, path in ipairs(resolved_rules.writable or {}) do
-    table.insert(spawn_args, "--bind")
+  for _, path in ipairs(resolved_rules.readable or {}) do
+    table.insert(spawn_args, "--ro-bind")
     table.insert(spawn_args, path)
     table.insert(spawn_args, path)
   end
 
-  for _, path in ipairs(resolved_rules.readable or {}) do
-    table.insert(spawn_args, "--ro-bind")
+  -- Emitted after readable so a path present in both groups ends up
+  -- writable: bwrap mounts are last-mount-wins.
+  for _, path in ipairs(resolved_rules.writable or {}) do
+    table.insert(spawn_args, "--bind")
     table.insert(spawn_args, path)
     table.insert(spawn_args, path)
   end
@@ -97,16 +99,18 @@ end
 ---@return string|nil err Error message, or nil if valid
 function M.validate_opts(opts)
   if opts and opts.extra_args ~= nil and type(opts.extra_args) ~= "table" then
-    return "run_bash: sandbox.backends.bubblewrap.extra_args must be a table or nil"
+    return "sandbox.backends.bubblewrap.extra_args must be a table or nil"
   end
   return nil
 end
 
 ---Return capability flags for this backend.
----@return table
+---@return table { kill_by_name: boolean, fs_deny_files: boolean, fs_deny_dirs: false|"block"|"mask" }
 function M.capabilities()
   return {
-    named_sandbox = false,
+    kill_by_name = false,
+    fs_deny_files = false,
+    fs_deny_dirs = "mask",
   }
 end
 

@@ -62,6 +62,7 @@ This is a CodeCompanion extension — it provides a `run_bash` tool which replac
               -- Rules appended to the profile at runtime
               -- Paths are auto-expanded: `~`, `$VAR`,
               -- and XDG fallbacks (e.g. `$XDG_DATA_HOME` → `~/.local/share`) are resolved
+              -- Relative paths (e.g. `.`) resolve against the Neovim working directory
               -- see [sandbox/init.lua](lua/codecompanion/_extensions/run_bash/sandbox/init.lua) for default rules
               rules = {
                 -- Extra paths allowed reading at runtime.
@@ -184,6 +185,49 @@ Bubblewrap has a more limited `fs_denied` model than sandlock:
 - **Non-existent paths** → silently skipped, with a one-time `vim.notify_once` warning
 
 For most cases, sandlock (`backend = "sandlock"`) is the recommended option — it covers files and non-existent deny targets. Continue to set `backends.sandlock.profile` with a [sandlock profile](https://github.com/multikernel/sandlock) for full denial coverage.
+
+### Custom Backend
+
+You can supply a custom sandbox backend as a Lua module. Configure it under `sandbox.backends.<name>.module`:
+
+```lua
+sandbox = {
+  backend = "mybackend",
+  backends = {
+    mybackend = {
+      module = "my_plugin.sandbox_backend",  -- Lua module path
+      -- additional backend-specific options
+    },
+  },
+}
+```
+
+The custom module must export the following functions:
+
+- `is_available(opts) -> boolean`
+- `validate_opts(opts) -> string|nil`
+- `capabilities() -> table`
+- `get_description() -> string`
+- `run(opts, exec_params) -> handle|nil, pid|string|nil, sandbox_used, sandbox_name`
+- `kill(opts, sandbox_name, pid, on_killed, deps) -> nil`
+
+The `capabilities()` function must return a table with these keys:
+
+```lua
+{
+  kill_by_name = boolean,          -- true if the backend supports named sandboxes
+  fs_deny_files = boolean,         -- true if the backend can deny individual files
+  fs_deny_dirs = false | "block" | "mask",  -- directory denial behavior
+}
+```
+
+**Trust boundary:** Custom backends execute with Neovim's privileges. Only load modules you trust.
+
+To run the contract test matrix against a custom backend:
+
+```bash
+TEST_CC_RUN_BASH_CUSTOM_BACKEND="my_plugin.sandbox_backend" make test_file FILE=tests/units/test_sandbox_backends.lua
+```
 
 ## Default Pause List
 

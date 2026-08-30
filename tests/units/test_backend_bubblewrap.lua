@@ -55,6 +55,36 @@ T["build_args: readable produces --ro-bind SRC SRC"] = function()
   MiniTest.expect.equality("/usr", args[3])
 end
 
+T["build_args: writable bind emitted after readable for same path"] = function()
+  -- bwrap mounts are last-mount-wins: a path in both groups must end with
+  -- its writable --bind emitted last, or the read-only mount wins.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = { "/x" }, writable = { "/x" }, denied = {} },
+    {
+      fs_stat = function()
+        return nil
+      end,
+    }
+  )
+  local ro_bind_pos, bind_pos = nil, nil
+  for i, arg in ipairs(args) do
+    if arg == "--ro-bind" then
+      ro_bind_pos = ro_bind_pos or i
+    elseif arg == "--bind" then
+      bind_pos = bind_pos or i
+    end
+  end
+  MiniTest.expect.equality(true, ro_bind_pos ~= nil, "--ro-bind mount must be present")
+  MiniTest.expect.equality(true, bind_pos ~= nil, "--bind mount must be present")
+  MiniTest.expect.equality(
+    true,
+    bind_pos > ro_bind_pos,
+    "writable --bind must be emitted after readable --ro-bind (last mount wins)"
+  )
+end
+
 T["build_args: denied directory produces --tmpfs PATH"] = function()
   local args = backend._build_args(
     { extra_args = nil },
@@ -261,7 +291,9 @@ end
 
 T["capabilities: returns expected flags"] = function()
   MiniTest.expect.equality({
-    named_sandbox = false,
+    kill_by_name = false,
+    fs_deny_files = false,
+    fs_deny_dirs = "mask",
   }, backend.capabilities())
 end
 
