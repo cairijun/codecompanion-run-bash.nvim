@@ -5,6 +5,10 @@
 --- No named sandbox support — kill uses two-stage SIGTERM → SIGKILL.
 --- fs_denied only supports directories (via --tmpfs); files and nonexistent
 --- paths are silently skipped because bwrap lacks a clean file-deny primitive.
+--- Device nodes are mounted via --dev-bind: bind-mounted devices cannot be
+--- opened inside a user namespace (kernel restriction). bwrap has no
+--- read-only device bind, so readable devices are widened to writable with
+--- a one-time warning.
 
 local uv = vim.uv
 local sandbox = require("codecompanion._extensions.run_bash.sandbox")
@@ -39,16 +43,46 @@ function M._build_args(opts, cmd, resolved_rules, deps)
 
   local spawn_args = {}
 
+  -- Bind-mounted device nodes (char/block) cannot be opened inside a user
+  -- namespace (kernel restriction), so devices route to --dev-bind, which
+  -- creates a fresh device node instead. stat failures fall back to the
+  -- plain bind handling.
+  local function is_device(path)
+    local stat = fs_stat(path)
+    return stat ~= nil and (stat.type == "char" or stat.type == "block")
+  end
+
   for _, path in ipairs(resolved_rules.readable or {}) do
-    table.insert(spawn_args, "--ro-bind")
-    table.insert(spawn_args, path)
-    table.insert(spawn_args, path)
+    if is_device(path) then
+      table.insert(spawn_args, "--dev-bind")
+      table.insert(spawn_args, path)
+      table.insert(spawn_args, path)
+      -- bwrap has no read-only device bind, so a readable-only device rule
+      -- is widened to writable. A path also listed in writable is an
+      -- explicit grant, not a widening, and does not warn.
+      if not vim.tbl_contains(resolved_rules.writable or {}, path) then
+        vim.notify_once(
+          "run_bash: bubblewrap backend mounts readable device "
+            .. path
+            .. " as writable (bwrap has no read-only device bind)",
+          vim.log.levels.WARN
+        )
+      end
+    else
+      table.insert(spawn_args, "--ro-bind")
+      table.insert(spawn_args, path)
+      table.insert(spawn_args, path)
+    end
   end
 
   -- Emitted after readable so a path present in both groups ends up
   -- writable: bwrap mounts are last-mount-wins.
   for _, path in ipairs(resolved_rules.writable or {}) do
-    table.insert(spawn_args, "--bind")
+    if is_device(path) then
+      table.insert(spawn_args, "--dev-bind")
+    else
+      table.insert(spawn_args, "--bind")
+    end
     table.insert(spawn_args, path)
     table.insert(spawn_args, path)
   end

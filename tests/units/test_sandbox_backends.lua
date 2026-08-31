@@ -138,6 +138,38 @@ T["matrix"]["allowed read succeeds"] = function(driver)
   MiniTest.expect.equality(0, result.exit_code)
 end
 
+T["matrix"]["writable device rule works"] = function(driver)
+  -- Intent: a device path in fs_writable must be openable for writing inside
+  -- the sandbox on every backend — device usability is part of the common
+  -- backend contract, not bubblewrap-specific.
+  skip_guard(driver)
+  local result =
+    Util.run_and_wait(driver, "echo x > /dev/null && echo DEVOK", { fs_writable = { "/dev/null" } })
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  Helpers.expect_contains("DEVOK", result.content)
+  MiniTest.expect.equality(0, result.exit_code)
+end
+
+T["matrix"]["readable device rule works"] = function(driver)
+  -- Intent: a device path in fs_readable must be openable for reading inside
+  -- the sandbox on every backend — same common-contract rationale as the
+  -- writable case above.
+  -- Overrides replace the whole fs_readable list (nested lists are not
+  -- merged), so the userland paths must be repeated here or bash/head
+  -- themselves go missing inside the sandbox.
+  skip_guard(driver)
+  local result = Util.run_and_wait(
+    driver,
+    "head -c0 /dev/null && echo DEVOK",
+    { fs_readable = { "/dev/null", ".", "/usr", "/bin", "/lib", "/lib64" } }
+  )
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  Helpers.expect_contains("DEVOK", result.content)
+  MiniTest.expect.equality(0, result.exit_code)
+end
+
 T["matrix"]["output interleaving"] = function(driver)
   skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo out1; echo err1 >&2; echo out2")
