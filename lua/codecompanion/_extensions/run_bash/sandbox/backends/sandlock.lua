@@ -66,6 +66,7 @@ end
 
 ---Validate backend-specific config at setup time.
 ---@param opts table|nil Backend-specific config ({ profile?, extra_args? })
+---@param rules table|nil Raw fs_* rules (unused by sandlock, which resolves them at run time)
 ---@return string|nil err Error message, or nil if valid
 function M.validate_opts(opts)
   if opts and opts.profile ~= nil and type(opts.profile) ~= "string" then
