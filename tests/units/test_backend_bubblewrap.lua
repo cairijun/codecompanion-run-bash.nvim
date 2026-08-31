@@ -162,20 +162,12 @@ end
 T["build_args: writable char device produces --dev-bind"] = function()
   -- Intent: bind-mounted device nodes cannot be opened inside a user
   -- namespace (kernel restriction), so writable device rules must use
-  -- --dev-bind instead of --bind. The absence of a widening warning is
-  -- covered by the readable+writable case below.
+  -- --dev-bind instead of --bind.
   local args = backend._build_args(
     { extra_args = nil },
     "ls",
     { readable = {}, writable = { "/dev/null" }, denied = {} },
-    {
-      fs_stat = function(path)
-        if path == "/dev/null" then
-          return { type = "char" }
-        end
-        return nil
-      end,
-    }
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
   )
   MiniTest.expect.equality("--dev-bind", args[1])
   MiniTest.expect.equality("/dev/null", args[2])
@@ -183,43 +175,21 @@ T["build_args: writable char device produces --dev-bind"] = function()
   MiniTest.expect.equality(false, vim.tbl_contains(args, "--bind"))
 end
 
-T["build_args: readable char device produces --dev-bind with warning"] = function()
+T["build_args: readable char device produces --dev-bind"] = function()
   -- Intent: readable device rules must also use --dev-bind (same kernel
-  -- restriction), but bwrap has no read-only device bind, so the mount is
-  -- wider than the declared rule and MUST warn about the widening.
-  local notify_called = false
-  local notify_msg = nil
-  local args
-  Helpers.with_mocks({
-    ["vim.notify_once"] = function(msg, _level)
-      notify_called = true
-      notify_msg = msg
-    end,
-  }, function()
-    args = backend._build_args(
-      { extra_args = nil },
-      "ls",
-      { readable = { "/dev/null" }, writable = {}, denied = {} },
-      {
-        fs_stat = function(path)
-          if path == "/dev/null" then
-            return { type = "char" }
-          end
-          return nil
-        end,
-      }
-    )
-  end)
+  -- restriction). bwrap has no read-only device bind, so the mount is wider
+  -- than the declared rule — validate_opts rejects that combination at
+  -- setup; run time only routes the mount flag.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = { "/dev/null" }, writable = {}, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
   MiniTest.expect.equality("--dev-bind", args[1])
   MiniTest.expect.equality("/dev/null", args[2])
   MiniTest.expect.equality("/dev/null", args[3])
   MiniTest.expect.equality(false, vim.tbl_contains(args, "--ro-bind"))
-  MiniTest.expect.equality(true, notify_called, "widened readable device rule must warn")
-  MiniTest.expect.equality(
-    true,
-    type(notify_msg) == "string" and notify_msg:find("/dev/null", 1, true) ~= nil,
-    "warning should name the widened device path"
-  )
 end
 
 T["build_args: writable block device produces --dev-bind"] = function()
@@ -229,14 +199,7 @@ T["build_args: writable block device produces --dev-bind"] = function()
     { extra_args = nil },
     "ls",
     { readable = {}, writable = { "/dev/fake-block0" }, denied = {} },
-    {
-      fs_stat = function(path)
-        if path == "/dev/fake-block0" then
-          return { type = "block" }
-        end
-        return nil
-      end,
-    }
+    { fs_stat = stat_stub({ ["/dev/fake-block0"] = { type = "block" } }) }
   )
   MiniTest.expect.equality("--dev-bind", args[1])
   MiniTest.expect.equality("/dev/fake-block0", args[2])
@@ -251,14 +214,7 @@ T["build_args: writable directory still produces --bind"] = function()
     { extra_args = nil },
     "ls",
     { readable = {}, writable = { "/tmp" }, denied = {} },
-    {
-      fs_stat = function(path)
-        if path == "/tmp" then
-          return { type = "directory" }
-        end
-        return nil
-      end,
-    }
+    { fs_stat = stat_stub({ ["/tmp"] = { type = "directory" } }) }
   )
   MiniTest.expect.equality("--bind", args[1])
   MiniTest.expect.equality("/tmp", args[2])
@@ -266,31 +222,15 @@ T["build_args: writable directory still produces --bind"] = function()
   MiniTest.expect.equality(false, vim.tbl_contains(args, "--dev-bind"))
 end
 
-T["build_args: device in both readable and writable emits --dev-bind twice, no warning"] = function()
-  -- Intent: a device covered by an explicit writable grant is not widened by
-  -- its readable entry, so warning would be a false positive; both groups
-  -- still emit their own --dev-bind mount.
-  local notify_called = false
-  local args
-  Helpers.with_mocks({
-    ["vim.notify_once"] = function(_msg, _level)
-      notify_called = true
-    end,
-  }, function()
-    args = backend._build_args(
-      { extra_args = nil },
-      "ls",
-      { readable = { "/dev/null" }, writable = { "/dev/null" }, denied = {} },
-      {
-        fs_stat = function(path)
-          if path == "/dev/null" then
-            return { type = "char" }
-          end
-          return nil
-        end,
-      }
-    )
-  end)
+T["build_args: device in both readable and writable emits --dev-bind twice"] = function()
+  -- Intent: both groups emit their own mount for a shared path; bwrap is
+  -- last-mount-wins, so the writable --dev-bind (emitted later) takes effect.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = { "/dev/null" }, writable = { "/dev/null" }, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
   local dev_bind_count = 0
   for _, arg in ipairs(args) do
     if arg == "--dev-bind" then
@@ -298,7 +238,6 @@ T["build_args: device in both readable and writable emits --dev-bind twice, no w
     end
   end
   MiniTest.expect.equality(2, dev_bind_count, "both groups should emit --dev-bind")
-  MiniTest.expect.equality(false, notify_called, "writable grant already covers write access")
 end
 
 T["build_args: nil sandbox_name does not break arg construction"] = function()

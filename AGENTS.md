@@ -26,7 +26,7 @@ Major files in `lua/codecompanion/_extensions/run_bash/`:
 | `sandbox/init.lua` | Facade. Backend name validation, `sandbox_name` generation, `run`/`kill`/`is_available`/`should_use`/`get_description` dispatch by `opts.backend`. |
 | `sandbox/resolver.lua` | Generic path resolution: `resolve_path`, `resolve_fs_rules`, XDG fallback. |
 | `sandbox/backends/sandlock.lua` | sandlock backend: CLI arg construction, availability (`sandlock` exec + profile), validate_opts, named-sandbox run/kill. |
-| `sandbox/backends/bubblewrap.lua` | bubblewrap backend: maps `fs_*` rules to bwrap CLI (`--bind`, `--ro-bind`, `--dev-bind` for device nodes — bwrap has no read-only device bind, so `validate_opts` rejects readable-only device rules and devices whose nearest bound ancestor mount is read-only; the run-time widening warning is only a safety net, `--tmpfs` for dirs only), uid_map availability check, two-stage SIGTERM/SIGKILL kill. |
+| `sandbox/backends/bubblewrap.lua` | bubblewrap backend: maps `fs_*` rules to bwrap CLI (`--bind`, `--ro-bind`, `--dev-bind` for device nodes — bwrap has no read-only device bind, so `validate_opts` rejects readable-only device rules and devices whose nearest bound ancestor mount is read-only, `--tmpfs` for dirs only), uid_map availability check, two-stage SIGTERM/SIGKILL kill. |
 | `tool.lua` | Tool definition. Schema, dynamic description (from `sandbox.get_description`), output handlers. Session registry stores `sandbox_opts` + `sandbox_name`; kill passes them through the facade. |
 
 Flow: `init.setup()` registers tool → agent calls tool → handler validates args → `sandbox` facade decides + dispatches to backend → on_exit → output → chat.
@@ -70,7 +70,7 @@ Test layers:
 - **Unit — checker** (`tests/units/test_checker.lua`): Pause list logic, config override, edge cases. Pure logic, no I/O.
 - **Unit — resolver** (`tests/units/test_resolver.lua`): Path resolution, XDG fallbacks, `resolve_fs_rules` grouping/dedup/existence checks. Tests `sandbox/resolver.lua` in isolation.
 - **Unit — sandlock backend** (`tests/units/test_backend_sandlock.lua`): CLI args, availability, validate_opts, run/kill spies. Tests `sandbox/backends/sandlock.lua` in isolation.
-- **Unit — bubblewrap backend** (`tests/units/test_backend_bubblewrap.lua`): Bind/connect args mapping, `--dev-bind` device routing and widening warning, setup-time device rule validation, fs_denied dir-vs-file-skip, uid_map availability, two-stage kill. Tests `sandbox/backends/bubblewrap.lua` in isolation.
+- **Unit — bubblewrap backend** (`tests/units/test_backend_bubblewrap.lua`): Bind/connect args mapping, `--dev-bind` device routing, setup-time device rule validation, fs_denied dir-vs-file-skip, uid_map availability, two-stage kill. Tests `sandbox/backends/bubblewrap.lua` in isolation.
 - **Unit — sandbox facade** (`tests/units/test_sandbox.lua`): Facade dispatch by `opts.backend`, unknown backend error, `run()` return shape, defaults, and non-sandbox two-stage kill. Tests `sandbox/init.lua` without real backends.
 - **Unit — sandbox backends matrix** (`tests/units/test_sandbox_backends.lua`): Common backend contract (execution, capture, exit codes, isolation, device rules, kill) against `sandlock`, `bubblewrap`, and the non-sandbox `none` driver.
 - **Unit — tool** (`tests/units/test_tool.lua`): Resource cleanup, registry persistence of `sandbox_opts`/`sandbox_name`, kill opts dispatch, cleanup_all per-entry, dynamic description, temp file security, concurrency safety, async I/O, ANSI stripping. Tests `tool.lua` with mocked `sandbox` facade.

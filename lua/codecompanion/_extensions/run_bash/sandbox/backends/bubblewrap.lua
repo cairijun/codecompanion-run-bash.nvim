@@ -7,10 +7,10 @@
 --- paths are silently skipped because bwrap lacks a clean file-deny primitive.
 --- Device nodes are mounted via --dev-bind: bind-mounted devices cannot be
 --- opened inside a user namespace (kernel restriction). bwrap has no
---- read-only device bind, so validate_opts rejects readable-only device rules
---- and devices whose nearest bound ancestor mount is read-only (bwrap could
---- not create the node there). The run-time widening warning in _build_args is
---- only a safety net for callers that reach it without validation.
+--- read-only device bind, so a readable device rule can only be honoured by a
+--- writable mount — validate_opts rejects that widening at setup, along with
+--- devices whose nearest bound ancestor mount is read-only (bwrap could not
+--- create the node there).
 
 local uv = vim.uv
 local resolver = require("codecompanion._extensions.run_bash.sandbox.resolver")
@@ -25,7 +25,7 @@ local function is_device(stat)
   return stat ~= nil and (stat.type == "char" or stat.type == "block")
 end
 
----True when `mount` is `path` itself or one of its parent directories.
+---True when `mount` is a parent directory of `path` (`/` covers every absolute path).
 ---@param mount string
 ---@param path string
 ---@return boolean
@@ -59,16 +59,6 @@ function M._build_args(opts, cmd, resolved_rules, deps)
   deps = deps or {}
   local fs_stat = deps.fs_stat or uv.fs_stat
 
-  -- Memoized: the same path can be stat'd by both a mount loop and the
-  -- fs_denied loop.
-  local stat_cache = {}
-  local function stat_of(path)
-    if stat_cache[path] == nil then
-      stat_cache[path] = fs_stat(path) or false
-    end
-    return stat_cache[path] or nil
-  end
-
   local spawn_args = {}
 
   local function emit_mount(flag, path)
@@ -78,28 +68,13 @@ function M._build_args(opts, cmd, resolved_rules, deps)
   end
 
   for _, path in ipairs(resolved_rules.readable or {}) do
-    if is_device(stat_of(path)) then
-      emit_mount("--dev-bind", path)
-      -- Safety net for callers that skipped validate_opts: the mount is wider
-      -- than the rule. A path also listed in writable is an explicit grant,
-      -- not a widening, and does not warn.
-      if not vim.tbl_contains(resolved_rules.writable or {}, path) then
-        vim.notify_once(
-          "run_bash: bubblewrap backend mounts readable device "
-            .. path
-            .. " as writable (bwrap has no read-only device bind)",
-          vim.log.levels.WARN
-        )
-      end
-    else
-      emit_mount("--ro-bind", path)
-    end
+    emit_mount(is_device(fs_stat(path)) and "--dev-bind" or "--ro-bind", path)
   end
 
   -- Emitted after readable so a path present in both groups ends up
   -- writable: bwrap mounts are last-mount-wins.
   for _, path in ipairs(resolved_rules.writable or {}) do
-    emit_mount(is_device(stat_of(path)) and "--dev-bind" or "--bind", path)
+    emit_mount(is_device(fs_stat(path)) and "--dev-bind" or "--bind", path)
   end
 
   -- fs_denied: bwrap can only deny existing directories via --tmpfs. Files and
@@ -108,7 +83,7 @@ function M._build_args(opts, cmd, resolved_rules, deps)
   -- users understand the coverage gap.
   local warned_nonexistent = false
   for _, path in ipairs(resolved_rules.denied or {}) do
-    local stat = stat_of(path)
+    local stat = fs_stat(path)
     if stat ~= nil and stat.type == "directory" then
       table.insert(spawn_args, "--tmpfs")
       table.insert(spawn_args, path)
@@ -180,9 +155,10 @@ function M.validate_opts(opts, rules, deps)
       -- could only be honoured by mounting it writable — reject the silent
       -- widening instead. A path also listed in writable is an explicit grant.
       if not writable[path] then
-        return "sandbox.backends.bubblewrap: fs_readable device '"
-          .. path
-          .. "' would be mounted writable (bwrap has no read-only device bind); move it to fs_writable or remove it"
+        return string.format(
+          "sandbox.backends.bubblewrap: fs_readable device '%s' would be mounted writable (bwrap has no read-only device bind); move it to fs_writable or remove it",
+          path
+        )
       end
       table.insert(devices, path)
     elseif stat ~= nil and stat.type == "directory" then
@@ -211,13 +187,12 @@ function M.validate_opts(opts, rules, deps)
         end
       end
       if ro_parent then
-        return "sandbox.backends.bubblewrap: device '"
-          .. device
-          .. "' is under read-only bound directory '"
-          .. ro_parent
-          .. "'; bwrap cannot create the device node there — make '"
-          .. ro_parent
-          .. "' writable or remove the device rule"
+        return string.format(
+          "sandbox.backends.bubblewrap: device '%s' is under read-only bound directory '%s'; bwrap cannot create the device node there — make '%s' writable or remove the device rule",
+          device,
+          ro_parent,
+          ro_parent
+        )
       end
     end
   end
