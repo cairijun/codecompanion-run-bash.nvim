@@ -247,6 +247,32 @@ T["facade: validate_backend_opts dispatches to backend"] = function()
   package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
 end
 
+T["facade: validate_backend_opts forwards rules to backend"] = function()
+  -- Intent: backends validate fs rules (e.g. bubblewrap rejects readable-only
+  -- devices) at setup time, so the facade must hand the full rules table to
+  -- validate_opts — without it the backend can only check its own opts.
+  local captured_rules
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = {
+    is_available = function() end,
+    capabilities = function()
+      return { kill_by_name = false, fs_deny_files = false, fs_deny_dirs = "mask" }
+    end,
+    run = function() end,
+    kill = function() end,
+    validate_opts = function(_opts, rules)
+      captured_rules = rules
+    end,
+    get_description = function() end,
+  }
+  sandbox.validate_backend_opts({
+    backend = "bubblewrap",
+    rules = { fs_readable = { "/x" } },
+    backends = { bubblewrap = {} },
+  })
+  MiniTest.expect.equality({ fs_readable = { "/x" } }, captured_rules)
+  package.loaded["codecompanion._extensions.run_bash.sandbox.backends.bubblewrap"] = nil
+end
+
 T["facade: sandboxed run returns nil handle propagates error"] = function()
   local function spawn_stub(exe, opts, on_exit)
     return nil, "spawn failed"

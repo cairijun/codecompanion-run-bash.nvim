@@ -138,6 +138,43 @@ T["matrix"]["allowed read succeeds"] = function(driver)
   MiniTest.expect.equality(0, result.exit_code)
 end
 
+T["matrix"]["writable device rule works"] = function(driver)
+  -- Intent: a device path in fs_writable must be openable for writing inside
+  -- the sandbox on every backend — device usability is part of the common
+  -- backend contract, not bubblewrap-specific.
+  -- build_sandbox_opts merges rule overrides with vim.tbl_deep_extend("force"),
+  -- which merges lists index by index instead of replacing them: fs_writable
+  -- { "/dev/null" } over common_rules { ".", "/tmp" } yields
+  -- { "/dev/null", "/tmp" }, dropping the cwd grant. This command only writes
+  -- to /dev/null, so the missing cwd grant does not affect it.
+  skip_guard(driver)
+  local result =
+    Util.run_and_wait(driver, "echo x > /dev/null && echo DEVOK", { fs_writable = { "/dev/null" } })
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  Helpers.expect_contains("DEVOK", result.content)
+  MiniTest.expect.equality(0, result.exit_code)
+end
+
+T["matrix"]["readable device rule works"] = function(driver)
+  -- Intent: a device path in fs_readable must be openable for reading inside
+  -- the sandbox on every backend — same common-contract rationale as the
+  -- writable case above.
+  -- build_sandbox_opts merges rule overrides index by index (see the writable
+  -- case above), so fs_readable is built from common_rules and /dev/null is
+  -- appended at the end: indices 1-5 match the defaults and are preserved,
+  -- keeping the userland paths that bash and head need. Deriving from
+  -- common_rules keeps this list correct as those defaults evolve.
+  skip_guard(driver)
+  local readable = vim.list_extend(vim.deepcopy(Util.common_rules.fs_readable), { "/dev/null" })
+  local result =
+    Util.run_and_wait(driver, "head -c0 /dev/null && echo DEVOK", { fs_readable = readable })
+  MiniTest.expect.equality(true, result.completed, result.error or "")
+  expect_sandbox_meta(driver, result)
+  Helpers.expect_contains("DEVOK", result.content)
+  MiniTest.expect.equality(0, result.exit_code)
+end
+
 T["matrix"]["output interleaving"] = function(driver)
   skip_guard(driver)
   local result = Util.run_and_wait(driver, "echo out1; echo err1 >&2; echo out2")

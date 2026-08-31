@@ -656,4 +656,53 @@ T["init: validate_opts error propagates as setup() failure"] = function()
   MiniTest.expect.equality(true, type(err) == "string", "error message should be a string")
 end
 
+T["init: bubblewrap rejects readable-only device rule at setup"] = function()
+  -- Intent: /dev/null in fs_readable alone would be mounted writable under
+  -- bubblewrap (no read-only device bind exists), so setup must fail at
+  -- startup with the offending path named — not silently widen at run time.
+  -- Uses the real /dev/null: every Linux host has this char device.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = {
+      backend = "bubblewrap",
+      rules = { fs_readable = { "/dev/null" } },
+    },
+  })
+
+  MiniTest.expect.equality(false, ok, "readable-only device rule should fail setup")
+  MiniTest.expect.equality(true, type(err) == "string" and err:find("/dev/null", 1, true) ~= nil)
+
+  -- Positive control: the same device declared writable is an explicit grant.
+  tools_config.run_bash = nil
+  local ok_writable = pcall(run_bash.setup, {
+    sandbox = {
+      backend = "bubblewrap",
+      rules = { fs_writable = { "/dev/null" } },
+    },
+  })
+  MiniTest.expect.equality(true, ok_writable, "explicit writable device rule should pass setup")
+end
+
+T["init: bubblewrap rejects device under read-only mount at setup"] = function()
+  -- Intent: granting /dev/null writable while /dev stays read-only leaves
+  -- bwrap unable to create the device node — it fails at launch. Real paths
+  -- are used because this mirrors the reported real-world configuration.
+  local run_bash = require("codecompanion._extensions.run_bash")
+  local tools_config = require("codecompanion.config").interactions.chat.tools
+
+  tools_config.run_bash = nil
+  local ok, err = pcall(run_bash.setup, {
+    sandbox = {
+      backend = "bubblewrap",
+      rules = { fs_readable = { "/dev" }, fs_writable = { "/dev/null" } },
+    },
+  })
+
+  MiniTest.expect.equality(false, ok, "device under read-only mount should fail setup")
+  MiniTest.expect.equality(true, type(err) == "string" and err:find("/dev", 1, true) ~= nil)
+end
+
 return T

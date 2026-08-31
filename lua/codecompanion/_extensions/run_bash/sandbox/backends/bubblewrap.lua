@@ -5,11 +5,33 @@
 --- No named sandbox support — kill uses two-stage SIGTERM → SIGKILL.
 --- fs_denied only supports directories (via --tmpfs); files and nonexistent
 --- paths are silently skipped because bwrap lacks a clean file-deny primitive.
+--- Device nodes are mounted via --dev-bind: bind-mounted devices cannot be
+--- opened inside a user namespace (kernel restriction). bwrap has no
+--- read-only device bind, so a readable device rule can only be honoured by a
+--- writable mount — validate_opts rejects that widening at setup, along with
+--- devices whose nearest bound ancestor mount is read-only (bwrap could not
+--- create the node there).
 
 local uv = vim.uv
+local resolver = require("codecompanion._extensions.run_bash.sandbox.resolver")
 local sandbox = require("codecompanion._extensions.run_bash.sandbox")
 
 local M = {}
+
+---True for char/block device nodes, false for every other stat (including nil).
+---@param stat table|nil
+---@return boolean
+local function is_device(stat)
+  return stat ~= nil and (stat.type == "char" or stat.type == "block")
+end
+
+---True when `mount` is a parent directory of `path` (`/` covers every absolute path).
+---@param mount string
+---@param path string
+---@return boolean
+local function covers(mount, path)
+  return mount == "/" and vim.startswith(path, "/") or vim.startswith(path, mount .. "/")
+end
 
 ---Read /proc/self/uid_map and check for a valid user namespace mapping.
 ---`0 0 0` (or absent file) means the namespace is not configured for unprivileged use.
@@ -39,18 +61,20 @@ function M._build_args(opts, cmd, resolved_rules, deps)
 
   local spawn_args = {}
 
+  local function emit_mount(flag, path)
+    table.insert(spawn_args, flag)
+    table.insert(spawn_args, path)
+    table.insert(spawn_args, path)
+  end
+
   for _, path in ipairs(resolved_rules.readable or {}) do
-    table.insert(spawn_args, "--ro-bind")
-    table.insert(spawn_args, path)
-    table.insert(spawn_args, path)
+    emit_mount(is_device(fs_stat(path)) and "--dev-bind" or "--ro-bind", path)
   end
 
   -- Emitted after readable so a path present in both groups ends up
   -- writable: bwrap mounts are last-mount-wins.
   for _, path in ipairs(resolved_rules.writable or {}) do
-    table.insert(spawn_args, "--bind")
-    table.insert(spawn_args, path)
-    table.insert(spawn_args, path)
+    emit_mount(is_device(fs_stat(path)) and "--dev-bind" or "--bind", path)
   end
 
   -- fs_denied: bwrap can only deny existing directories via --tmpfs. Files and
@@ -94,13 +118,85 @@ function M.is_available(opts)
   return uid_map_valid()
 end
 
----Validate backend-specific config at setup time.
+---Validate backend-specific config and fs rules at setup time.
+---Device rules are checked here because rules are frozen at setup (even the
+---function form is evaluated once), so one check covers every run-time case.
 ---@param opts table|nil Backend-specific config ({ extra_args? })
+---@param rules table|nil Raw fs_* rules; nil only when a caller bypasses the facade
+---@param deps? table { fs_stat? }
 ---@return string|nil err Error message, or nil if valid
-function M.validate_opts(opts)
+function M.validate_opts(opts, rules, deps)
   if opts and opts.extra_args ~= nil and type(opts.extra_args) ~= "table" then
     return "sandbox.backends.bubblewrap.extra_args must be a table or nil"
   end
+  if rules == nil then
+    return nil
+  end
+
+  deps = deps or {}
+  local fs_stat = deps.fs_stat or uv.fs_stat
+  local resolved = resolver.resolve_fs_rules(rules, fs_stat)
+
+  local writable, devices, writable_dirs, readable_dirs = {}, {}, {}, {}
+  for _, path in ipairs(resolved.writable) do
+    writable[path] = true
+    local stat = fs_stat(path)
+    if is_device(stat) then
+      table.insert(devices, path)
+    elseif stat ~= nil and stat.type == "directory" then
+      table.insert(writable_dirs, path)
+    end
+  end
+
+  for _, path in ipairs(resolved.readable) do
+    local stat = fs_stat(path)
+    if is_device(stat) then
+      -- bwrap has no read-only device bind, so a readable-only device rule
+      -- could only be honoured by mounting it writable — reject the silent
+      -- widening instead. A path also listed in writable is an explicit grant.
+      if not writable[path] then
+        return string.format(
+          "sandbox.backends.bubblewrap: fs_readable device '%s' would be mounted writable (bwrap has no read-only device bind); move it to fs_writable or remove it",
+          path
+        )
+      end
+      table.insert(devices, path)
+    elseif stat ~= nil and stat.type == "directory" then
+      table.insert(readable_dirs, path)
+    end
+  end
+
+  -- --dev-bind creates the node inside the mount that owns the device's parent
+  -- directory, so a read-only owner makes bwrap fail at launch. Readable mounts
+  -- are emitted before writable ones and bwrap is last-mount-wins, so any
+  -- writable directory ancestor overrides every read-only ancestor.
+  for _, device in ipairs(devices) do
+    local writable_parent = nil
+    for _, dir in ipairs(writable_dirs) do
+      if covers(dir, device) then
+        writable_parent = dir
+        break
+      end
+    end
+    if not writable_parent then
+      -- Longest match points at the mount actually owning the device.
+      local ro_parent = nil
+      for _, dir in ipairs(readable_dirs) do
+        if covers(dir, device) and (ro_parent == nil or #dir > #ro_parent) then
+          ro_parent = dir
+        end
+      end
+      if ro_parent then
+        return string.format(
+          "sandbox.backends.bubblewrap: device '%s' is under read-only bound directory '%s'; bwrap cannot create the device node there — make '%s' writable or remove the device rule",
+          device,
+          ro_parent,
+          ro_parent
+        )
+      end
+    end
+  end
+
   return nil
 end
 

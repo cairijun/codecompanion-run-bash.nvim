@@ -6,7 +6,7 @@
 ---
 --- Backend interface contract (each backend module must implement):
 ---   is_available(opts)        -> boolean
----   validate_opts(opts)       -> string|nil   (error msg or nil)
+---   validate_opts(opts, rules) -> string|nil  (error msg or nil; rules are the raw fs_* rules)
 ---   capabilities()            -> table  { kill_by_name: bool, fs_deny_files: bool, fs_deny_dirs: false|"block"|"mask" }
 ---   get_description()         -> string
 ---   run(opts, exec_params)     -> handle|nil, pid|string|nil, sandbox_used:bool, sandbox_name:string|nil
@@ -312,7 +312,7 @@ function M.validate_backend_opts(opts)
   if err then
     return err
   end
-  return backend.validate_opts(backend_opts(opts))
+  return backend.validate_opts(backend_opts(opts), opts.rules)
 end
 
 return M

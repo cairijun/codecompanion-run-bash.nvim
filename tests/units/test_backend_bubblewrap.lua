@@ -14,6 +14,14 @@ local T = MiniTest.new_set()
 
 local function no_op() end
 
+-- fs_stat stub: paths absent from `map` report as non-existent, which makes
+-- resolve_fs_rules drop them the same way real missing paths are dropped.
+local function stat_stub(map)
+  return function(path)
+    return map[path]
+  end
+end
+
 -- Rules sufficient to run /bin/bash and its shared libraries inside bwrap.
 local common_rules = {
   writable = { vim.fn.getcwd(), "/tmp" },
@@ -151,6 +159,87 @@ T["build_args: nonexistent denied path skipped with one-time warning"] = functio
   )
 end
 
+T["build_args: writable char device produces --dev-bind"] = function()
+  -- Intent: bind-mounted device nodes cannot be opened inside a user
+  -- namespace (kernel restriction), so writable device rules must use
+  -- --dev-bind instead of --bind.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = {}, writable = { "/dev/null" }, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
+  MiniTest.expect.equality("--dev-bind", args[1])
+  MiniTest.expect.equality("/dev/null", args[2])
+  MiniTest.expect.equality("/dev/null", args[3])
+  MiniTest.expect.equality(false, vim.tbl_contains(args, "--bind"))
+end
+
+T["build_args: readable char device produces --dev-bind"] = function()
+  -- Intent: readable device rules must also use --dev-bind (same kernel
+  -- restriction). bwrap has no read-only device bind, so the mount is wider
+  -- than the declared rule — validate_opts rejects that combination at
+  -- setup; run time only routes the mount flag.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = { "/dev/null" }, writable = {}, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
+  MiniTest.expect.equality("--dev-bind", args[1])
+  MiniTest.expect.equality("/dev/null", args[2])
+  MiniTest.expect.equality("/dev/null", args[3])
+  MiniTest.expect.equality(false, vim.tbl_contains(args, "--ro-bind"))
+end
+
+T["build_args: writable block device produces --dev-bind"] = function()
+  -- Intent: block devices share the same kernel restriction as char devices;
+  -- a fictional path is used because host block device names are not portable.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = {}, writable = { "/dev/fake-block0" }, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/fake-block0"] = { type = "block" } }) }
+  )
+  MiniTest.expect.equality("--dev-bind", args[1])
+  MiniTest.expect.equality("/dev/fake-block0", args[2])
+  MiniTest.expect.equality("/dev/fake-block0", args[3])
+  MiniTest.expect.equality(false, vim.tbl_contains(args, "--bind"))
+end
+
+T["build_args: writable directory still produces --bind"] = function()
+  -- Intent: non-device paths keep the existing --bind/--ro-bind mapping;
+  -- the device routing must not alter directory handling.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = {}, writable = { "/tmp" }, denied = {} },
+    { fs_stat = stat_stub({ ["/tmp"] = { type = "directory" } }) }
+  )
+  MiniTest.expect.equality("--bind", args[1])
+  MiniTest.expect.equality("/tmp", args[2])
+  MiniTest.expect.equality("/tmp", args[3])
+  MiniTest.expect.equality(false, vim.tbl_contains(args, "--dev-bind"))
+end
+
+T["build_args: device in both readable and writable emits --dev-bind twice"] = function()
+  -- Intent: both groups emit their own mount for a shared path; bwrap is
+  -- last-mount-wins, so the writable --dev-bind (emitted later) takes effect.
+  local args = backend._build_args(
+    { extra_args = nil },
+    "ls",
+    { readable = { "/dev/null" }, writable = { "/dev/null" }, denied = {} },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
+  local dev_bind_count = 0
+  for _, arg in ipairs(args) do
+    if arg == "--dev-bind" then
+      dev_bind_count = dev_bind_count + 1
+    end
+  end
+  MiniTest.expect.equality(2, dev_bind_count, "both groups should emit --dev-bind")
+end
+
 T["build_args: nil sandbox_name does not break arg construction"] = function()
   local args = backend._build_args(
     { extra_args = nil },
@@ -285,6 +374,179 @@ end
 T["validate_opts: invalid extra_args returns error string"] = function()
   local err = backend.validate_opts({ extra_args = "bad" })
   MiniTest.expect.equality(true, type(err) == "string" and err ~= "")
+end
+
+T["validate_opts: readable-only char device is rejected"] = function()
+  -- Intent: bwrap has no read-only device mount primitive, so a device listed
+  -- only in fs_readable would be mounted writable — an undeclared privilege
+  -- widening. Setup must reject it and point at fs_writable instead.
+  local err = backend.validate_opts({}, { fs_readable = { "/dev/null" } }, {
+    fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }),
+  })
+  MiniTest.expect.equality("string", type(err))
+  MiniTest.expect.equality(
+    true,
+    err:find("/dev/null", 1, true) ~= nil,
+    "error should name the device"
+  )
+  MiniTest.expect.equality(
+    true,
+    err:find("fs_writable", 1, true) ~= nil,
+    "error should suggest fs_writable"
+  )
+end
+
+T["validate_opts: readable-only block device is rejected"] = function()
+  -- Intent: block devices carry the same mount limitation as char devices, so
+  -- the rejection must not be char-specific.
+  local err = backend.validate_opts({}, { fs_readable = { "/dev/fake-block0" } }, {
+    fs_stat = stat_stub({ ["/dev/fake-block0"] = { type = "block" } }),
+  })
+  MiniTest.expect.equality("string", type(err))
+  MiniTest.expect.equality(true, err:find("/dev/fake-block0", 1, true) ~= nil)
+end
+
+T["validate_opts: device in both readable and writable is accepted"] = function()
+  -- Intent: a device listed in both groups is an explicit write grant; the
+  -- readable entry adds no widening (bwrap is last-mount-wins), so it passes.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/dev/null" }, fs_writable = { "/dev/null" } },
+    { fs_stat = stat_stub({ ["/dev/null"] = { type = "char" } }) }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: device under read-only bound directory is rejected"] = function()
+  -- Intent: --dev-bind must create the device node inside its parent mount,
+  -- so a device whose only bound ancestor is read-only makes bwrap fail at
+  -- startup. Reject the combination at setup and name both paths.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/dev" }, fs_writable = { "/dev/null" } },
+    {
+      fs_stat = stat_stub({ ["/dev"] = { type = "directory" }, ["/dev/null"] = { type = "char" } }),
+    }
+  )
+  MiniTest.expect.equality("string", type(err))
+  MiniTest.expect.equality(
+    true,
+    err:find("/dev", 1, true) ~= nil,
+    "error should name the mount point"
+  )
+  MiniTest.expect.equality(
+    true,
+    err:find("/dev/null", 1, true) ~= nil,
+    "error should name the device"
+  )
+end
+
+T["validate_opts: device under read-only root mount is rejected"] = function()
+  -- Intent: "/" is the ancestor of every absolute path, so a read-only root
+  -- makes every device rule unmountable — it must be rejected too.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/" }, fs_writable = { "/dev/null" } },
+    { fs_stat = stat_stub({ ["/"] = { type = "directory" }, ["/dev/null"] = { type = "char" } }) }
+  )
+  MiniTest.expect.equality("string", type(err))
+end
+
+T["validate_opts: device in a writable directory is accepted"] = function()
+  -- Intent: --dev-bind can create the node when its parent mount is writable,
+  -- which is the common case (/dev granted writable alongside the device).
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/dev" }, fs_writable = { "/dev", "/dev/null" } },
+    {
+      fs_stat = stat_stub({ ["/dev"] = { type = "directory" }, ["/dev/null"] = { type = "char" } }),
+    }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: deeper writable mount overrides shallower read-only mount"] = function()
+  -- Intent: readable mounts are emitted before writable ones and bwrap is
+  -- last-mount-wins, so a deep writable /dev beats a read-only "/" ancestor.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/" }, fs_writable = { "/dev", "/dev/null" } },
+    {
+      fs_stat = stat_stub({
+        ["/"] = { type = "directory" },
+        ["/dev"] = { type = "directory" },
+        ["/dev/null"] = { type = "char" },
+      }),
+    }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: shallower writable mount shadows deeper read-only mount"] = function()
+  -- Intent: same last-mount-wins rule as above, tested from the other
+  -- direction — writable /dev wins over the read-only /dev/pts ancestor.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/dev/pts" }, fs_writable = { "/dev", "/dev/pts/ptmx" } },
+    {
+      fs_stat = stat_stub({
+        ["/dev"] = { type = "directory" },
+        ["/dev/pts"] = { type = "directory" },
+        ["/dev/pts/ptmx"] = { type = "char" },
+      }),
+    }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: device without any bound ancestor is accepted"] = function()
+  -- Intent: bwrap creates missing parent directories for mount targets, so a
+  -- device with no ancestor mount at all still starts fine.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/usr" }, fs_writable = { "/dev/null" } },
+    {
+      fs_stat = stat_stub({ ["/usr"] = { type = "directory" }, ["/dev/null"] = { type = "char" } }),
+    }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: nonexistent device rule is dropped before checking"] = function()
+  -- Intent: resolve_fs_rules drops paths that do not exist, so a typo'd device
+  -- rule never reaches the device checks (the rule is a silent no-op).
+  local err = backend.validate_opts(
+    {},
+    { fs_writable = { "/dev/nope-xyz" } },
+    { fs_stat = stat_stub({}) }
+  )
+  MiniTest.expect.equality(nil, err)
+end
+
+T["validate_opts: readable-only device reports the widening error first"] = function()
+  -- Intent: a device that is both readable-only and under a read-only mount
+  -- violates both rules; the widening error is reported because it is also
+  -- the fix the user must apply (move it to fs_writable).
+  local err = backend.validate_opts({}, { fs_readable = { "/dev", "/dev/null" } }, {
+    fs_stat = stat_stub({ ["/dev"] = { type = "directory" }, ["/dev/null"] = { type = "char" } }),
+  })
+  MiniTest.expect.equality("string", type(err))
+  MiniTest.expect.equality(
+    true,
+    err:find("fs_writable", 1, true) ~= nil,
+    "widening error should take priority over the mount-point error"
+  )
+end
+
+T["validate_opts: readable directory is not treated as a device"] = function()
+  -- Intent: the device check must key off the stat type — ordinary directories
+  -- in fs_readable keep working with a plain --ro-bind.
+  local err = backend.validate_opts(
+    {},
+    { fs_readable = { "/usr" } },
+    { fs_stat = stat_stub({ ["/usr"] = { type = "directory" } }) }
+  )
+  MiniTest.expect.equality(nil, err)
 end
 
 -- ── capabilities tests ───────────────────────────────────────────
