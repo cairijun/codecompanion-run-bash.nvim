@@ -33,6 +33,78 @@ T["strip_ansi: combined CSI codes"] = function()
   )
 end
 
+-- ── Pure add_tool_output tests ────────────────────────────────────────
+
+---Chat stub recording the raw arguments passed to add_tool_output.
+local function new_chat_stub()
+  local stub = { calls = {} }
+  function stub:add_tool_output(...)
+    table.insert(self.calls, { n = select("#", ...), ... })
+  end
+  return stub
+end
+
+T["add_tool_output: v20+ passes a { content, display } table"] = function()
+  local chat = new_chat_stub()
+  local tool = { name = "run_bash" }
+  tool_mod._internal.add_tool_output({
+    chat = chat,
+    tool = tool,
+    content = "for llm",
+    display = "for user",
+    version = "20.0.1",
+  })
+  MiniTest.expect.equality(1, #chat.calls)
+  MiniTest.expect.equality(2, chat.calls[1].n)
+  MiniTest.expect.equality(tool, chat.calls[1][1])
+  MiniTest.expect.equality({ content = "for llm", display = "for user" }, chat.calls[1][2])
+end
+
+T["add_tool_output: v20+ without display leaves display nil"] = function()
+  local chat = new_chat_stub()
+  tool_mod._internal.add_tool_output({
+    chat = chat,
+    tool = {},
+    content = "only llm",
+    version = "21.3.0",
+  })
+  MiniTest.expect.equality({ content = "only llm" }, chat.calls[1][2])
+end
+
+T["add_tool_output: v19 and earlier pass positional strings"] = function()
+  for _, version in ipairs({ "19.9.9", "v19.0.0", "1.0.0" }) do
+    local chat = new_chat_stub()
+    local tool = { name = "run_bash" }
+    tool_mod._internal.add_tool_output({
+      chat = chat,
+      tool = tool,
+      content = "for llm",
+      display = "for user",
+      version = version,
+    })
+    MiniTest.expect.equality(1, #chat.calls, version)
+    MiniTest.expect.equality(3, chat.calls[1].n, version)
+    MiniTest.expect.equality(tool, chat.calls[1][1], version)
+    MiniTest.expect.equality("for llm", chat.calls[1][2], version)
+    MiniTest.expect.equality("for user", chat.calls[1][3], version)
+  end
+end
+
+T["uses_table_tool_output: major version boundary"] = function()
+  local uses = tool_mod._internal.uses_table_tool_output
+  MiniTest.expect.equality(false, uses("19.99.99"))
+  MiniTest.expect.equality(true, uses("20.0.0"))
+  MiniTest.expect.equality(true, uses("v20.0.1"))
+  MiniTest.expect.equality(true, uses("100.0.0"))
+end
+
+T["uses_table_tool_output: unknown or unparsable version defaults to table form"] = function()
+  local uses = tool_mod._internal.uses_table_tool_output
+  MiniTest.expect.equality(true, uses(nil))
+  MiniTest.expect.equality(true, uses(""))
+  MiniTest.expect.equality(true, uses("not-a-version"))
+end
+
 -- ── Pure SessionRegistry tests ────────────────────────────────────────
 
 T["SessionRegistry: gen_session_id produces unique ids"] = function()

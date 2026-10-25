@@ -56,6 +56,48 @@ local function close_timer(timer)
   end
 end
 
+-- First CodeCompanion major whose `Chat:add_tool_output` takes an opts table.
+local TABLE_TOOL_OUTPUT_MIN_MAJOR = 20
+
+---Whether the given CodeCompanion version uses the `{ content, display }` table
+---form of `Chat:add_tool_output`. Unknown or unparsable versions are treated as
+---current, since only older releases need the positional form.
+---@param version string|nil e.g. "20.0.1" or "v19.3.0"
+---@return boolean
+local function uses_table_tool_output(version)
+  local major = tonumber(tostring(version or ""):match("^v?(%d+)"))
+  return major == nil or major >= TABLE_TOOL_OUTPUT_MIN_MAJOR
+end
+
+---Read the installed CodeCompanion version, or nil when unavailable.
+---@return string|nil
+local function codecompanion_version()
+  local ok, codecompanion = pcall(require, "codecompanion")
+  if not ok or type(codecompanion.version) ~= "function" then
+    return nil
+  end
+  local version_ok, version = pcall(codecompanion.version)
+  return version_ok and version or nil
+end
+
+---@class CodeCompanion.RunBash.AddToolOutputOpts
+---@field chat table Chat buffer exposing `add_tool_output` (`meta.tools.chat` in an output handler)
+---@field tool table The running tool (`self` in an output handler)
+---@field content string Message sent to the LLM
+---@field display? string Message shown in the chat buffer (defaults to `content`)
+---@field version? string CodeCompanion version override (defaults to the installed one)
+
+---Add a tool's output to the chat, using the `add_tool_output` signature that
+---matches the installed CodeCompanion version.
+---@param opts CodeCompanion.RunBash.AddToolOutputOpts
+---@return any
+local function add_tool_output(opts)
+  if uses_table_tool_output(opts.version or codecompanion_version()) then
+    return opts.chat:add_tool_output(opts.tool, { content = opts.content, display = opts.display })
+  end
+  return opts.chat:add_tool_output(opts.tool, opts.content, opts.display)
+end
+
 -- ── SessionRegistry ───────────────────────────────────────────────────
 
 ---Registry encapsulating background sessions and foreground processes.
@@ -134,6 +176,8 @@ local M = {}
 M._internal = {
   SessionRegistry = SessionRegistry,
   strip_ansi = strip_ansi,
+  add_tool_output = add_tool_output,
+  uses_table_tool_output = uses_table_tool_output,
 }
 
 local default_registry = SessionRegistry.new({ uv = uv, sandbox = sandbox, os_remove = os.remove })
@@ -543,7 +587,7 @@ Safety:
 - Do NOT run destructive commands: rm -rf, format disks, modify system configs.
 - Do NOT install software (pip install, npm install -g, apt-get).
 - Do NOT download from untrusted URLs.
-- Do NOT print/send sensitive info (passwords, tokens, user history, personally identifiable info, etc.). 
+- Do NOT print/send sensitive info (passwords, tokens, user history, personally identifiable info, etc.).
 - Prefer read-only operations. Write only within the project workspace.]]
 
   -- ── Dynamic schema ────────────────────────────────────────────────
@@ -655,25 +699,27 @@ Safety:
 
       if d.kill_info then
         if d.kill_info == "already exited" then
-          return meta.tools.chat:add_tool_output(
-            self,
-            fmt(
+          return add_tool_output({
+            chat = meta.tools.chat,
+            tool = self,
+            content = fmt(
               "Session %s already exited (code: %s).\nOutput file preserved at: %s",
               d.session_id or "?",
               d.exit_code or "?",
               d.file_path or "?"
-            )
-          )
+            ),
+          })
         end
-        return meta.tools.chat:add_tool_output(
-          self,
-          fmt(
+        return add_tool_output({
+          chat = meta.tools.chat,
+          tool = self,
+          content = fmt(
             "Killed background session %s (PID %d).\nOutput file preserved at: %s",
             d.session_id,
             d.pid,
             d.file_path or "?"
-          )
-        )
+          ),
+        })
       end
 
       if d.bg_running then
@@ -701,7 +747,12 @@ Session: %s | PID: %d | File: %s
           d.file_path,
           d.output
         )
-        return meta.tools.chat:add_tool_output(self, message, user_msg)
+        return add_tool_output({
+          chat = meta.tools.chat,
+          tool = self,
+          content = message,
+          display = user_msg,
+        })
       end
 
       -- Foreground success / bg_exited success
@@ -721,14 +772,19 @@ Sandbox: %s
         d.sandbox_active and "YES" or "NO",
         out
       )
-      return meta.tools.chat:add_tool_output(self, message, user_msg)
+      return add_tool_output({
+        chat = meta.tools.chat,
+        tool = self,
+        content = message,
+        display = user_msg,
+      })
     end,
 
     error = function(self, data, meta)
       local d = data and data[1] or data
 
       if d.error then
-        return meta.tools.chat:add_tool_output(self, d.error)
+        return add_tool_output({ chat = meta.tools.chat, tool = self, content = d.error })
       end
 
       local out = d.output or "unknown error"
@@ -756,14 +812,20 @@ Sandbox: %s
         d.sandbox_active and "YES" or "NO",
         out
       )
-      return meta.tools.chat:add_tool_output(self, message, user_msg)
+      return add_tool_output({
+        chat = meta.tools.chat,
+        tool = self,
+        content = message,
+        display = user_msg,
+      })
     end,
 
     rejected = function(self, meta)
-      return meta.tools.chat:add_tool_output(
-        self,
-        "User rejected: " .. (meta.opts.reason or "no reason given")
-      )
+      return add_tool_output({
+        chat = meta.tools.chat,
+        tool = self,
+        content = "User rejected: " .. (meta.opts.reason or "no reason given"),
+      })
     end,
   }
 
